@@ -330,14 +330,19 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             });
 
             const userData = response.data;
-            const email = (userData && userData.email) ? userData.email.trim() : null;
+            const identity = (
+                (userData && userData.email ? String(userData.email).trim() : '') ||
+                (userData && userData.username ? String(userData.username).trim() : '') ||
+                (userData && userData.ldap_username ? String(userData.ldap_username).trim() : '') ||
+                (userData && userData.external_user_name ? String(userData.external_user_name).trim() : '')
+            ) || null;
 
-            if (email) {
-                console.log(`[Info] Resolved qTest user ID '${userId}' to email '${email}'`);
-                return email;
+            if (identity) {
+                console.log(`[Info] Resolved qTest user ID '${userId}' to identity '${identity}' (email may be blank for SSO users)`);
+                return identity;
             }
 
-            console.log(`[Warn] qTest user ID '${userId}' has no email on record; cannot map Assigned To.`);
+            console.log(`[Warn] qTest user ID '${userId}}' has no email on record; cannot map Assigned To.`);
             return null;
 
         } catch (error) {
@@ -502,7 +507,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             if (error.response) {
                 console.log(`[Error] Failed to create bug in Azure DevOps. Status: ${error.response.status}`);
                 console.log(`[Error] Status: ${error.response.status}`);
-                console.log(`[Error] Data: ${JSON.stringify(error.response.data, null, 2)}`);
+                console.log(`[Error] Data: ${JSON.stringify(error.response ? error.response.data : null, null, 2)}`);
 
             } else if (error.request) {
                 console.log(`[Error] No response received from ADO. Possible network or permission issue.`);
@@ -510,7 +515,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             } else {
                 console.log(`[Error] Raw: ${JSON.stringify(error, null, 2)}`);
                 console.log(`[Error] Raw: ${error.message}`);
-                console.log(`[Error] Response: ${JSON.stringify(error.response.data, null, 2)}`);
+                console.log(`[Error] Response: ${JSON.stringify(error.response ? error.response.data : null, null, 2)}`);
                 console.log(`[Debug] ADO Request Payload: ${JSON.stringify(requestBody, null, 2)}`);
             }
             console.log(`[Debug] Full error object: ${JSON.stringify(error, Object.getOwnPropertyNames(error), 2)}`);
