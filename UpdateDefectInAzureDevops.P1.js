@@ -96,7 +96,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         });
 
                 const u = userResp?.data || {};
-        const identity = (u.email || "").trim() || (u.username || "").trim() || (u.ldap_username || "").trim() || (u.external_user_name || "").trim();
+        const identity = ((u.username || "").trim() || (u.ldap_username || "").trim() || (u.external_user_name || "").trim();
         userEmail = (u.email || "").trim();
         userName = identity;
       } catch (e) {
