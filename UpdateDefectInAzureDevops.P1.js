@@ -95,8 +95,10 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
           headers: { Authorization: `Bearer ${constants.QTEST_TOKEN}` }
         });
 
-        userEmail = userResp?.data?.email || "";
-        userName = userResp?.data?.username || "";
+                const u = userResp?.data || {};
+        const identity = (u.email || "").trim() || (u.username || "").trim() || (u.ldap_username || "").trim() || (u.external_user_name || "").trim();
+        userEmail = (u.email || "").trim();
+        userName = identity;
       } catch (e) {
         console.error("[Error] Failed to fetch qTest user details:", e.response?.data || e.message);
       }
