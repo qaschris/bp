@@ -35,7 +35,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         defectDetails.affectedRelease,
         defectDetails.createdBy,
         defectDetails.externalReference,
-        defectDetails.assignedToEmail
+        defectDetails.assignedTo
     );
 
     if (!bug) return;
@@ -331,7 +331,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
             const userData = response.data;
             const identity = (
-                (userData && userData.email ? String(userData.email).trim() : '') ||
+                //(userData && userData.email ? String(userData.email).trim() : '') ||
                 (userData && userData.username ? String(userData.username).trim() : '') ||
                 (userData && userData.ldap_username ? String(userData.ldap_username).trim() : '') ||
                 (userData && userData.external_user_name ? String(userData.external_user_name).trim() : '')
