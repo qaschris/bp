@@ -35,6 +35,69 @@
             return eventData.resource.revision ? eventData.resource.revision.fields : eventData.resource.fields;
         }
 
+        function extractUpnOrEmailFromAdoAssignedTo(raw) {
+            // Handles ADO identity object OR string formats.
+            // Returns a normalized email/UPN string, or null if not resolvable.
+
+            if (!raw) return null;
+
+            // If ADO sends an identity object, prefer uniqueName (usually UPN/email).
+            if (typeof raw === "object") {
+                const candidate =
+                    raw.uniqueName ||
+                    raw.mail ||
+                    raw.email ||
+                    raw.userPrincipalName ||
+                    raw.displayName ||
+                    "";
+                return candidate ? candidate.trim() : null;
+            }
+
+            if (typeof raw !== "string") return null;
+
+            const s = raw.trim();
+
+            // Common ADO display format: "Last, First (ORG) <user@domain>"
+            const angle = s.match(/<([^>]+)>/);
+            if (angle && angle[1]) return angle[1].trim();
+
+            // If no angle brackets, try to find an email anywhere in the string.
+            const email = s.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+            if (email && email[0]) return email[0].trim();
+
+            // Fallback: sometimes it might already just be a UPN-ish string
+            return s || null;
+        }
+
+        async function resolveQtestUserIdByUsernameOrUpn(identity, standardHeaders) {
+            if (!identity) return null;
+
+            const url = `https://${constants.ManagerURL}/api/v3/users/search?username=${encodeURIComponent(identity)}`;
+
+            try {
+                const resp = await axios.get(url, { headers: standardHeaders });
+                const data = resp && resp.data;
+
+                // API shape can vary: sometimes array, sometimes {items:[...]} or {data:[...]}
+                const arr = Array.isArray(data)
+                    ? data
+                    : Array.isArray(data?.items)
+                        ? data.items
+                        : Array.isArray(data?.data)
+                            ? data.data
+                            : [];
+
+                const user = arr[0];
+                return user?.id ?? null;
+            } catch (e) {
+                console.log(
+                    `[Warn] qTest user search failed for '${identity}'. ` +
+                    `Status: ${e?.response?.status ?? "n/a"}`
+                );
+                return null;
+            }
+        }
+
         const standardHeaders = {
             "Content-Type": "application/json",
             Authorization: `bearer ${constants.QTEST_TOKEN}`,
@@ -88,18 +151,15 @@
         const fields = getFields(event);
 
         // Assigned To: ADO -> qTest (P1). Match users by email/UPN; BP SSO commonly uses uniqueName.
-        const adoAssignedToRaw = fields["System.AssignedTo"];
-        const adoAssignedToIdentity = extractAdoAssignedToIdentity(adoAssignedToRaw);
+        const adoAssignedToRaw = fields[constants.AzDoAssignedToFieldRef || "System.AssignedTo"];
+        const adoAssignedToIdentity = extractUpnOrEmailFromAdoAssignedTo(adoAssignedToRaw);
+
         if (adoAssignedToIdentity) {
-            console.log(`[Info] ADO Assigned To identity: '${adoAssignedToIdentity}'`);
+            console.log(`[Info] Normalized ADO Assigned To to '${adoAssignedToIdentity}'`);
+        } else if (adoAssignedToRaw) {
+            console.log(`[Warn] Could not normalize ADO Assigned To '${adoAssignedToRaw}'`);
         } else {
-            console.log(`[Info] ADO Assigned To is unassigned/blank.`);
-        }
-        const qtestAssignedToUserId = await resolveQtestUserIdByUsernameOrEmail(adoAssignedToIdentity);
-        if (qtestAssignedToUserId) {
-            console.log(`[Info] Resolved ADO Assigned To '${adoAssignedToIdentity}' -> qTest user id '${qtestAssignedToUserId}'`);
-        } else if (adoAssignedToIdentity) {
-            console.log(`[Warn] Could not resolve ADO Assigned To '${adoAssignedToIdentity}' in qTest. Will clear qTest assignment (Blank).`);
+            console.log(`[Info] ADO Assigned To is blank/unassigned.`);
         }
 
         // Get Severity from ADO and map to qTest allowed values
@@ -248,7 +308,7 @@
                 qtestProposedFixValue,
                 qtestClosedDateValue,
                 qtestResolvedReasonValue,
-                qtestAssignedToUserId
+                adoAssignedToIdentity
             );
         }
 
@@ -489,7 +549,7 @@
 
         
         function get(url) {
-            return doqTestRequest(url, \"GET\");
+            return doqTestRequest(url, "GET");
         }
 async function doqTestRequest(url, method, requestBody) {
             const opts = {
