@@ -35,7 +35,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         defectDetails.affectedRelease,
         defectDetails.createdBy,
         defectDetails.externalReference,
-        defectDetails.assignedTo
+        defectDetails.assignedToIdentity
     );
 
     if (!bug) return;
@@ -131,7 +131,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         const affectedReleaseField = getFieldById(defect, constants.DefectAffectedReleaseFieldID); // Mapping Affected Release/TestPhase
         const createdByField = getFieldById(defect, constants.DefectCreatedByFieldID); // Mapping Created By
         const externalReferenceField = getFieldById(defect, constants.DefectExternalReferenceFieldID); //External Reference
-        const assignedToField = constants.DefectAssignedToFieldID ? getFieldById(defect, constants.DefectAssignedToFieldID) : null; // Assigned To (qTest user id)
+        const assignedToField = constants.DefectAssignedToFieldID ? getFieldById(defect, constants.DefectAssignedToFieldID) : null; // Assigned To (user id)
 
         if (!summaryField || !descriptionField || !severityField) {
             console.log("[Error] Fields not found, exiting.");
@@ -162,18 +162,18 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         const externalReference = externalReferenceField ? externalReferenceField.field_value : null;
         console.log(`[Info] Defect External Reference: ${externalReference}`);
 
-        let assignedToEmail = null;
-        if (assignedToField && assignedToField.field_value) {
-            assignedToEmail = await getQtestUserEmail(assignedToField.field_value);
-        } else if (constants.DefectAssignedToFieldID) {
-            console.log(`[Info] Defect Assigned To is blank in qTest.`);
-        } else {
-            console.log(`[Info] DefectAssignedToFieldID constant not provided; skipping Assigned To sync on create.`);
-        }
-        console.log(`[Info] Defect Assigned To Email: ${assignedToEmail}`);
 
         //return { summary: summary, description: description, link: link, severity: severity, priority: priority,};
-        return { summary, description, link, severity, priority, defectType, status, affectedRelease, createdBy, externalReference, assignedToEmail };
+        // Resolve qTest Assigned To -> identity (email/UPN) for ADO
+        let assignedToIdentity = null;
+        if (assignedToField && assignedToField.field_value) {
+            assignedToIdentity = await resolveQTestUserIdToIdentity(assignedToField.field_value);
+        } else {
+            console.log(`[Info] Defect Assigned To is blank in qTest.`);
+        }
+        console.log(`[Info] Defect Assigned To Identity: ${assignedToIdentity}`);
+
+        return { summary, description, link, severity, priority, defectType, status, affectedRelease, createdBy, externalReference, assignedToIdentity };
     }
 
     async function getDefectById(defectId) {
@@ -315,42 +315,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         }
     }
 
-
-    // Helper: Fetch qTest user email by user ID (used for Assigned To sync to ADO)
-    async function getQtestUserEmail(userId) {
-        if (!userId) return null;
-
-        const userUrl = `https://${constants.ManagerURL}/api/v3/users/${userId}`;
-        try {
-            const response = await axios.get(userUrl, {
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `bearer ${constants.QTEST_TOKEN}`
-                }
-            });
-
-            const userData = response.data;
-            const identity = (
-                //(userData && userData.email ? String(userData.email).trim() : '') ||
-                (userData && userData.username ? String(userData.username).trim() : '') ||
-                (userData && userData.ldap_username ? String(userData.ldap_username).trim() : '') ||
-                (userData && userData.external_user_name ? String(userData.external_user_name).trim() : '')
-            ) || null;
-
-            if (identity) {
-                console.log(`[Info] Resolved qTest user ID '${userId}' to identity '${identity}' (email may be blank for SSO users)`);
-                return identity;
-            }
-
-            console.log(`[Warn] qTest user ID '${userId}}' has no email on record; cannot map Assigned To.`);
-            return null;
-
-        } catch (error) {
-            console.log(`[Warn] Could not resolve qTest user ID '${userId}' to email. Skipping Assigned To.`);
-            return null;
-        }
-    }
-
     async function createAzDoBug(
         defectId,
         name,
@@ -363,7 +327,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         qtestAffectedRelease,
         qtestCreatedBy,
         qtestExternalReference,
-        qtestAssignedToEmail
+        qtestAssignedToIdentity
     ) {
         console.log(`[Info] Creating bug in Azure DevOps '${defectId}'`);
         const baseUrl = encodeIfNeeded(constants.AzDoProjectURL);
@@ -434,17 +398,17 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             },
         ];
 
-        // Assigned To: if qTest has an assignee (resolved to email), set System.AssignedTo in ADO.
-        // Fallback required by BP: if not resolvable or blank, leave ADO unassigned.
-        if (qtestAssignedToEmail) {
-            requestBody.push({
+        // Assigned To (qTest -> ADO)
+        const adoAssignedToRef = constants.AzDoAssignedToFieldRef || "System.AssignedTo";
+        if (qtestAssignedToIdentity && String(qtestAssignedToIdentity).trim()) {
+            payload.push({
                 op: "add",
-                path: "/fields/System.AssignedTo",
-                value: qtestAssignedToEmail,
+                path: `/fields/${adoAssignedToRef}`,
+                value: String(qtestAssignedToIdentity).trim(),
             });
-            console.log(`[Info] Added Assigned To to ADO: ${qtestAssignedToEmail}`);
+            console.log(`[Info] Added Assigned To to ADO: ${String(qtestAssignedToIdentity).trim()}`);
         } else {
-            console.log(`[Info] Skipping Assigned To — qTest assignment is blank or could not be resolved to email.`);
+            console.log(`[Info] Skipping Assigned To — qTest assignment is blank or could not be resolved to identity.`);
         }
 
         if (mappedDefectType) {
@@ -507,7 +471,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             if (error.response) {
                 console.log(`[Error] Failed to create bug in Azure DevOps. Status: ${error.response.status}`);
                 console.log(`[Error] Status: ${error.response.status}`);
-                console.log(`[Error] Data: ${JSON.stringify(error.response ? error.response.data : null, null, 2)}`);
+                console.log(`[Error] Data: ${JSON.stringify(error.response && error.response.data ? error.response.data : null, null, 2)}`);
 
             } else if (error.request) {
                 console.log(`[Error] No response received from ADO. Possible network or permission issue.`);
@@ -515,7 +479,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             } else {
                 console.log(`[Error] Raw: ${JSON.stringify(error, null, 2)}`);
                 console.log(`[Error] Raw: ${error.message}`);
-                console.log(`[Error] Response: ${JSON.stringify(error.response ? error.response.data : null, null, 2)}`);
+                console.log(`[Error] Response: ${JSON.stringify(error.response && error.response.data ? error.response.data : null, null, 2)}`);
                 console.log(`[Debug] ADO Request Payload: ${JSON.stringify(requestBody, null, 2)}`);
             }
             console.log(`[Debug] Full error object: ${JSON.stringify(error, Object.getOwnPropertyNames(error), 2)}`);
@@ -549,6 +513,39 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         }
     }
 
+
+    async function resolveQTestUserIdToIdentity(userId) {
+        // Returns a string we can send to ADO's System.AssignedTo.
+        // For BP SSO users, qTest's `email` may be blank; `username` is typically the UPN/email.
+        if (!userId) return null;
+
+        try {
+            const url = `${encodeIfNeeded(constants.qtesturl)}/api/v3/users/${userId}`;
+            const response = await axios.get(url, { headers: getQTestAuthorizationHeaders() });
+            const u = response && response.data ? response.data : null;
+            if (!u) return null;
+
+            const identity = (u.username && u.username.trim())
+                || (u.ldap_username && u.ldap_username.trim())
+                || (u.external_user_name && u.external_user_name.trim())
+                || null;
+
+            if (identity) {
+                console.log(`[Info] Resolved qTest user ID '${userId}' to identity '${identity}' (email may be blank for SSO users)`);
+            } else {
+                console.log(`[Warn] qTest user ID '${userId}' has no usable identity (email/username/ldap_username/external_user_name).`);
+            }
+            return identity;
+        } catch (error) {
+            // Avoid throwing while logging — axios errors may not include error.response
+            if (error && error.response) {
+                console.log(`[Warn] Could not resolve qTest user ID '${userId}' to identity. Status: ${error.response.status}.`);
+            } else {
+                console.log(`[Warn] Could not resolve qTest user ID '${userId}' to identity. No HTTP response (network/config).`);
+            }
+            return null;
+        }
+    }
     function encodeIfNeeded(url) {
         try {
             // Decode the URL to check if it's already encoded
