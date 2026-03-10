@@ -521,7 +521,11 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
         try {
             const url = `${encodeIfNeeded(constants.qtesturl)}/api/v3/users/${userId}`;
-            const response = await axios.get(url, { headers: getQTestAuthorizationHeaders() });
+            const response = await axios.get(url, {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `bearer ${constants.QTEST_TOKEN}`
+                } });
             const u = response && response.data ? response.data : null;
             if (!u) return null;
 
