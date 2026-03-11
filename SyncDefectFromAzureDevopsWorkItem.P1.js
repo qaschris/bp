@@ -102,6 +102,7 @@
             "Content-Type": "application/json",
             Authorization: `bearer ${constants.QTEST_TOKEN}`,
         };
+        
         const eventType = {
             CREATED: "workitem.created",
             UPDATED: "workitem.updated",
@@ -150,16 +151,30 @@
         const defectSummary = buildDefectSummary(namePrefix, event);
         const fields = getFields(event);
 
-        // Assigned To: ADO -> qTest (P1). Match users by email/UPN; BP SSO commonly uses uniqueName.
+        // Assigned To: ADO -> qTest (P1). Match users by email/UPN; BP SSO commonly uses username/uniqueName.
         const adoAssignedToRaw = fields[constants.AzDoAssignedToFieldRef || "System.AssignedTo"];
-        const adoAssignedToIdentity = resolveQtestUserIdByUsernameOrUpn(extractUpnOrEmailFromAdoAssignedTo(adoAssignedToRaw));
+        const adoAssignedToIdentity = extractUpnOrEmailFromAdoAssignedTo(adoAssignedToRaw); // string
 
+        let qtestAssignedToUserId = null;
         if (adoAssignedToIdentity) {
             console.log(`[Info] Normalized ADO Assigned To to '${adoAssignedToIdentity}'`);
+
+            // IMPORTANT: await the async call, and pass headers if your function expects them
+            qtestAssignedToUserId = await resolveQtestUserIdByUsernameOrUpn(adoAssignedToIdentity, standardHeaders);
+
+            if (qtestAssignedToUserId) {
+                console.log(`[Info] Resolved ADO Assigned To '${adoAssignedToIdentity}' -> qTest userId '${qtestAssignedToUserId}'`);
+            } else {
+                console.log(
+                    `[Warn] Could not resolve ADO Assigned To '${adoAssignedToIdentity}' in qTest. ` +
+                    `Will clear qTest assignment (Blank).`
+                );
+            }
         } else if (adoAssignedToRaw) {
             console.log(`[Warn] Could not normalize ADO Assigned To '${adoAssignedToRaw}'`);
         } else {
             console.log(`[Info] ADO Assigned To is blank/unassigned.`);
+            // leave qtestAssignedToUserId as null so we clear it
         }
 
         // Get Severity from ADO and map to qTest allowed values
@@ -310,40 +325,6 @@
                 qtestResolvedReasonValue,
                 adoAssignedToIdentity
             );
-        }
-
-        
-        function extractAdoAssignedToIdentity(adoAssignedTo) {
-            if (!adoAssignedTo) return null;
-            if (typeof adoAssignedTo === "string") return adoAssignedTo.trim() || null;
-            // ADO often provides an identity object
-            const candidate =
-                adoAssignedTo.uniqueName ||
-                adoAssignedTo.mail ||
-                adoAssignedTo.email ||
-                adoAssignedTo.userPrincipalName ||
-                adoAssignedTo.displayName ||
-                null;
-            return (candidate && typeof candidate === "string" && candidate.trim().length > 0) ? candidate.trim() : null;
-        }
-
-        async function resolveQtestUserIdByUsernameOrEmail(identity) {
-            if (!identity) return null;
-            try {
-                // qTest user search endpoint (queries by username); BP SSO users commonly store UPN/email in username.
-                const url = `https://${constants.ManagerURL}/api/v3/users/search?username=${encodeURIComponent(identity)}`;
-                const result = await get(url);
-
-                // Result shape can vary by deployment; handle common patterns
-                if (Array.isArray(result) && result.length > 0 && result[0]?.id) return result[0].id;
-                if (result?.items && Array.isArray(result.items) && result.items.length > 0 && result.items[0]?.id) return result.items[0].id;
-                if (result?.id) return result.id;
-
-                return null;
-            } catch (err) {
-                console.log(`[Warn] Failed to resolve qTest user for '${identity}'. Leaving assignment blank. ${err.message}`);
-                return null;
-            }
         }
 
         function getNamePrefix(workItemId) {
@@ -520,13 +501,19 @@
                 console.log(`[Warn] No Resolved Reason provided or mapping not found`);
             }
 
-            // Add Assigned To (User field in qTest)
-            if (constants.DefectAssignedToFieldID && assignedToUserId) {
+            // Assigned To (qTest field expects userId; fallback = Blank)
+            if (constants.DefectAssignedToFieldID) {
                 requestBody.properties.push({
                     field_id: constants.DefectAssignedToFieldID,
-                    field_value: assignedToUserId,
+                    field_value: qtestAssignedToUserId ? qtestAssignedToUserId : ""
+                    // if BP qTest prefers null instead of "", change "" -> null
                 });
-                console.log(`[Info] Added Assigned To '${assignedToUserId}' to qTest update payload.`);
+
+                console.log(
+                    qtestAssignedToUserId
+                        ? `[Info] Added Assigned To userId '${qtestAssignedToUserId}' to qTest update payload.`
+                        : `[Info] Clearing qTest Assigned To (Blank) in update payload.`
+                );
             }
 
             console.log(`[Info] Updating defect '${defectId}' (${defectPid}).`);
