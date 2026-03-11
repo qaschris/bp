@@ -152,7 +152,7 @@
 
         // Assigned To: ADO -> qTest (P1). Match users by email/UPN; BP SSO commonly uses uniqueName.
         const adoAssignedToRaw = fields[constants.AzDoAssignedToFieldRef || "System.AssignedTo"];
-        const adoAssignedToIdentity = extractUpnOrEmailFromAdoAssignedTo(adoAssignedToRaw);
+        const adoAssignedToIdentity = resolveQtestUserIdByUsernameOrUpn(extractUpnOrEmailFromAdoAssignedTo(adoAssignedToRaw));
 
         if (adoAssignedToIdentity) {
             console.log(`[Info] Normalized ADO Assigned To to '${adoAssignedToIdentity}'`);
@@ -518,6 +518,15 @@
                 console.log(`[Info] Added Resolved Reason '${resolvedReasonValue}' to qTest update payload.`);
             } else {
                 console.log(`[Warn] No Resolved Reason provided or mapping not found`);
+            }
+
+            // Add Assigned To (User field in qTest)
+            if (constants.DefectAssignedToFieldID && assignedToUserId) {
+                requestBody.properties.push({
+                    field_id: constants.DefectAssignedToFieldID,
+                    field_value: assignedToUserId,
+                });
+                console.log(`[Info] Added Assigned To '${assignedToUserId}' to qTest update payload.`);
             }
 
             console.log(`[Info] Updating defect '${defectId}' (${defectPid}).`);
