@@ -513,43 +513,86 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         }
     }
 
-
     async function resolveQTestUserIdToIdentity(userId) {
         // Returns a string we can send to ADO's System.AssignedTo.
-        // For BP SSO users, qTest's `email` may be blank; `username` is typically the UPN/email.
+        // BP qTest SSO: email may be blank; username typically holds the UPN/email.
         if (!userId) return null;
 
+        // Build URL without encodeIfNeeded (it can mangle already-good URLs).
+        // Prefer a single canonical base URL variable in your rule (whatever you use elsewhere).
+        const base = (constants.qtesturl || constants.ManagerURL || "").trim();
+
+        // Ensure base has scheme and no trailing slash
+        const normalizedBase = base.startsWith("http")
+            ? base.replace(/\/+$/, "")
+            : `https://${base.replace(/\/+$/, "")}`;
+
+        const url = `${normalizedBase}/api/v3/users/${userId}`;
+
+        console.log(`[Debug] resolveQTestUserIdToIdentity URL = ${url}`);
+
         try {
-            const url = `${encodeIfNeeded(constants.qtesturl)}/api/v3/users/${userId}`;
             const response = await axios.get(url, {
                 headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `bearer ${constants.QTEST_TOKEN}`
-                } });
-            const u = response && response.data ? response.data : null;
+                    "Content-Type": "application/json",
+                    "Authorization": `Bearer ${constants.QTEST_TOKEN}`
+                }
+            });
+
+            const data = response?.data;
+            if (!data) return null;
+
+            // Handle both shapes:
+            // 1) direct user object: { id, username, email, ... }
+            // 2) wrapper: { items: [ { id, username, ... } ], total, ... }
+            const u = Array.isArray(data?.items) ? data.items[0] : data;
             if (!u) return null;
 
-            const identity = (u.username && u.username.trim())
-                || (u.ldap_username && u.ldap_username.trim())
-                || (u.external_user_name && u.external_user_name.trim())
-                || null;
+            // Identity preference for BP:
+            // - If email is populated, it's fine to use it, but SSO often leaves it blank.
+            // - username/ldap/external are usually the UPN you want for ADO.
+            const identity =
+                //(u.email && u.email.trim()) || //BP SSO often results in blank email, so deprioritizing email in favor of username fields
+                (u.username && u.username.trim()) ||
+                (u.ldap_username && u.ldap_username.trim()) ||
+                (u.external_user_name && u.external_user_name.trim()) ||
+                (u.external_username && u.external_username.trim()) ||
+                null;
 
             if (identity) {
-                console.log(`[Info] Resolved qTest user ID '${userId}' to identity '${identity}' (email may be blank for SSO users)`);
+                console.log(
+                    `[Info] Resolved qTest user ID '${userId}' to identity '${identity}' ` +
+                    `(email may be blank for SSO users)`
+                );
             } else {
-                console.log(`[Warn] qTest user ID '${userId}' has no usable identity (email/username/ldap_username/external_user_name).`);
+                console.log(
+                    `[Warn] qTest user ID '${userId}' has no usable identity fields ` +
+                    `(email/username/ldap_username/external_*).`
+                );
             }
+
             return identity;
         } catch (error) {
-            // Avoid throwing while logging — axios errors may not include error.response
-            if (error && error.response) {
-                console.log(`[Warn] Could not resolve qTest user ID '${userId}' to identity. Status: ${error.response.status}.`);
+            // This is the key: log axios error details that explain "no response".
+            const status = error?.response?.status;
+            const code = error?.code;
+            const msg = error?.message;
+
+            if (status) {
+                console.log(
+                    `[Warn] Could not resolve qTest user ID '${userId}' to identity. ` +
+                    `HTTP ${status}.`
+                );
             } else {
-                console.log(`[Warn] Could not resolve qTest user ID '${userId}' to identity. No HTTP response (network/config).`);
+                console.log(
+                    `[Warn] Could not resolve qTest user ID '${userId}' to identity. ` +
+                    `No HTTP response. code=${code || "n/a"} message=${msg || "n/a"} url=${url}`
+                );
             }
             return null;
         }
     }
+
     function encodeIfNeeded(url) {
         try {
             // Decode the URL to check if it's already encoded
