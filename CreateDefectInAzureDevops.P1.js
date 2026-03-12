@@ -401,7 +401,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         // Assigned To (qTest -> ADO)
         const adoAssignedToRef = constants.AzDoAssignedToFieldRef || "System.AssignedTo";
         if (qtestAssignedToIdentity && String(qtestAssignedToIdentity).trim()) {
-            payload.push({
+            requestBody.push({
                 op: "add",
                 path: `/fields/${adoAssignedToRef}`,
                 value: String(qtestAssignedToIdentity).trim(),
