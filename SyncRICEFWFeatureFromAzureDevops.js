@@ -142,7 +142,7 @@ exports.handler = async function ({ event, constants }, context, callback) {
             return moduleChildrenCache[cacheKey];
         }
 
-        const url = `https://${constants.ManagerURL}/api/v3/projects/${constants.ProjectID}/modules/${parentId}/sub-modules`;
+        const url = `https://${constants.ManagerURL}/api/v3/projects/${constants.ProjectID}/modules/${parentId}?expand=descendants`;
         const response = await doRequest(url, "GET", null);
         const items = Array.isArray(response)
             ? response
