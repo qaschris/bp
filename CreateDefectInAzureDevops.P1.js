@@ -35,7 +35,8 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         defectDetails.affectedRelease,
         defectDetails.createdBy,
         defectDetails.externalReference,
-        defectDetails.assignedToIdentity
+        defectDetails.assignedToIdentity,
+        defectDetails.targetDate
     );
 
     if (!bug) return;
@@ -132,6 +133,13 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         const createdByField = getFieldById(defect, constants.DefectCreatedByFieldID); // Mapping Created By
         const externalReferenceField = getFieldById(defect, constants.DefectExternalReferenceFieldID); //External Reference
         const assignedToField = constants.DefectAssignedToFieldID ? getFieldById(defect, constants.DefectAssignedToFieldID) : null; // Assigned To (user id)
+        const targetDateField = getFieldById(defect, constants.DefectTargetDateFieldID);
+        const targetDate = targetDateField ? targetDateField.field_value : null;
+        console.log(`[Info] Defect Target Date: ${targetDate}`);
+        if (!summaryField || !descriptionField || !severityField) {
+            console.log("[Error] Fields not found, exiting.");
+            return; // Prevents using undefined values
+        }
 
         if (!summaryField || !descriptionField || !severityField) {
             console.log("[Error] Fields not found, exiting.");
@@ -173,7 +181,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         }
         console.log(`[Info] Defect Assigned To Identity: ${assignedToIdentity}`);
 
-        return { summary, description, link, severity, priority, defectType, status, affectedRelease, createdBy, externalReference, assignedToIdentity };
+        return { summary, description, link, severity, priority, defectType, status, affectedRelease, createdBy, externalReference, assignedToIdentity, targetDate };
     }
 
     async function getDefectById(defectId) {
@@ -327,7 +335,8 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         qtestAffectedRelease,
         qtestCreatedBy,
         qtestExternalReference,
-        qtestAssignedToIdentity
+        qtestAssignedToIdentity,
+        qtestTargetDate
     ) {
         console.log(`[Info] Creating bug in Azure DevOps '${defectId}'`);
         const baseUrl = encodeIfNeeded(constants.AzDoProjectURL);
@@ -451,6 +460,15 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             console.log(`[Info] Added External Reference to ADO: ${qtestExternalReference}`);
         } else {
             console.log(`[Info] Skipping External Reference — no value in qTest`);
+        }
+
+        // Add Target Date (date only)
+        if (qtestTargetDate) {
+            requestBody.push({
+                op: "add",
+                path: "/fields/Microsoft.VSTS.Scheduling.TargetDate",
+                value: formatDateOnly(qtestTargetDate)
+            });
         }
 
         // --- Log full request before sending ---

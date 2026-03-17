@@ -13,6 +13,7 @@ exports.handler = async function ({ event, constants }, context, callback) {
         const fields = getFields(eventData);
         return fields["BP.ERP.FitGap"] || null;
     }
+
     function getBPEntity(eventData) {
         // UPDATE event → delta fields
         if (eventData.eventType === "workitem.updated") {
@@ -24,9 +25,6 @@ exports.handler = async function ({ event, constants }, context, callback) {
         const fields = getFields(eventData);
         return fields["Custom.Entity"] ?? null;
     }
-
-
-
 
     function getFields(eventData) {
         // In case of update the fields can be taken from the revision, in case of create from the resource directly
@@ -69,17 +67,71 @@ exports.handler = async function ({ event, constants }, context, callback) {
         Authorization: `bearer ${constants.QTEST_TOKEN}`,
     };
 
+    function safeJson(value) {
+        try {
+            return JSON.stringify(value, null, 2);
+        } catch (e) {
+            return `[Unserializable: ${e.message}]`;
+        }
+    }
+
+    function logDivider(title) {
+        console.log(`==================== ${title} ====================`);
+    }
+
+    function sanitizeHeadersForLog(headers) {
+        const clone = { ...(headers || {}) };
+        if (clone.Authorization) {
+            clone.Authorization = "[REDACTED]";
+        }
+        return clone;
+    }
+
     async function doRequest(url, method, requestBody) {
         const opts = {
             url,
             method,
             headers: standardHeaders,
-            data: requestBody,
         };
+
+        if (requestBody !== undefined && requestBody !== null && method !== "GET") {
+            opts.data = requestBody;
+        }
+
+        logDivider(`HTTP ${method}`);
+        console.log(`[Debug] URL: ${url}`);
+        console.log(`[Debug] Headers: ${safeJson(sanitizeHeadersForLog(standardHeaders))}`);
+        if (opts.data !== undefined) {
+            console.log(`[Debug] Request Payload: ${safeJson(opts.data)}`);
+        } else {
+            console.log(`[Debug] Request Payload: <none>`);
+        }
+
         try {
             const response = await axios(opts);
+
+            console.log(`[Debug] HTTP Status: ${response.status}`);
+            console.log(`[Debug] Response Headers: ${safeJson(response.headers)}`);
+            console.log(`[Debug] Response Body: ${safeJson(response.data)}`);
+
             return response.data;
         } catch (error) {
+            console.log(`[Error] HTTP request failed.`);
+            console.log(`[Error] URL: ${url}`);
+            console.log(`[Error] Method: ${method}`);
+            console.log(`[Error] Message: ${error.message}`);
+
+            if (error.response) {
+                console.log(`[Error] HTTP Status: ${error.response.status}`);
+                console.log(`[Error] Error Response Headers: ${safeJson(error.response.headers)}`);
+                console.log(`[Error] Error Response Body: ${safeJson(error.response.data)}`);
+            } else if (error.request) {
+                console.log(`[Error] No HTTP response received.`);
+                console.log(`[Error] Raw Request Object: ${safeJson(error.request)}`);
+            } else {
+                console.log(`[Error] Axios config/setup error: ${safeJson(error)}`);
+            }
+
             throw new Error(`Failed to ${method} ${url}. ${error.message}`);
         }
     }
@@ -105,6 +157,8 @@ exports.handler = async function ({ event, constants }, context, callback) {
     async function getSubModules(parentId) {
         const cacheKey = String(parentId);
         if (moduleChildrenCache[cacheKey]) {
+            console.log(`[Debug] getSubModules cache hit for parent '${parentId}'.`);
+            console.log(`[Debug] Cached children: ${moduleChildrenCache[cacheKey].map(c => `${c.name} (${c.id})`).join(", ")}`);
             return moduleChildrenCache[cacheKey];
         }
 
@@ -112,13 +166,20 @@ exports.handler = async function ({ event, constants }, context, callback) {
 
         try {
             const response = await doRequest(url, "GET", null);
-            const items = Array.isArray(response)
-                ? response
-                : Array.isArray(response?.items)
-                    ? response.items
-                    : Array.isArray(response?.data)
-                        ? response.data
-                        : [];
+
+            let items = [];
+            if (Array.isArray(response?.children)) {
+                items = response.children;
+            } else if (Array.isArray(response)) {
+                items = response;
+            } else if (Array.isArray(response?.items)) {
+                items = response.items;
+            } else if (Array.isArray(response?.data)) {
+                items = response.data;
+            }
+
+            console.log(`[Debug] getSubModules parent '${parentId}' resolved ${items.length} immediate children.`);
+            console.log(`[Debug] Children: ${items.map(c => `${c.name} (${c.id})`).join(", ")}`);
 
             moduleChildrenCache[cacheKey] = items;
             return items;
@@ -159,14 +220,18 @@ exports.handler = async function ({ event, constants }, context, callback) {
 
         for (const segment of segments) {
             const children = await getSubModules(currentParentId);
+            console.log(`[Debug] Looking for segment '${segment}' under parent '${currentParentId}'.`);
+            console.log(`[Debug] Children of ${currentParentId}: ${children.map(c => `${c.name} (${c.id})`).join(", ")}`);
             const existing = children.find(m =>
                 ((m?.name || "").trim().toLowerCase() === segment.toLowerCase())
             );
 
             if (existing) {
+                console.log(`[Debug] Found existing module match for '${segment}': ${safeJson(existing)}`);
                 currentParentId = existing.id;
                 console.log(`[Info] Reusing qTest module '${segment}' (id: ${currentParentId}).`);
             } else {
+                console.log(`[Debug] No existing module found for '${segment}' under parent '${currentParentId}'. Will create.`);
                 const created = await createModule(segment, currentParentId);
                 currentParentId = created?.id;
                 if (!currentParentId) {
@@ -193,10 +258,15 @@ exports.handler = async function ({ event, constants }, context, callback) {
         let requirement = undefined;
 
         try {
+            logDivider("SEARCH REQUIREMENT BY WORK ITEM ID");
+            console.log(`[Debug] Search Prefix: ${prefix}`);
+            console.log(`[Debug] Search Payload: ${safeJson(requestBody)}`);
             const response = await post(url, requestBody);
+            console.log(`[Debug] Search Response: ${safeJson(response)}`);
             if (!response || response.total === 0) {
                 console.log("[Info] Requirement not found by work item id.");
             } else if (response.total === 1) {
+                console.log(`[Debug] Requirement matched for update: ${safeJson(requirement)}`);
                 requirement = response.items[0];
             } else {
                 failed = true;
@@ -225,17 +295,14 @@ exports.handler = async function ({ event, constants }, context, callback) {
                 field_value: complexityValue,
             });
         }
-
+        console.log(`[Debug] Raw AssignedTo before normalization: ${safeJson(assignedTo)}`);
         if (assignedTo) {
-
             let removed_email = assignedTo.replace(/\s*<[^>]*>/g, '');
-
-
+            console.log(`[Debug] Normalized AssignedTo for qTest field: ${removed_email}`);
             requestBody.properties.push({
                 field_id: constants.RequirementAssignedToFieldID,
                 field_value: removed_email,
             });
-
         }
         if (iterationPath) {
             requestBody.properties.push({
@@ -263,6 +330,11 @@ exports.handler = async function ({ event, constants }, context, callback) {
         }
 
         try {
+            logDivider("UPDATE REQUIREMENT");
+            console.log(`[Debug] Requirement ID: ${requirementId}`);
+            console.log(`[Debug] Target Module ID: ${targetModuleId}`);
+            console.log(`[Debug] Update URL: ${url}`);
+            console.log(`[Debug] Final Update Payload: ${safeJson(requestBody)}`);
             await put(url, requestBody);
             console.log(`[Info] Requirement '${requirementId}' updated.`);
         } catch (error) {
@@ -287,9 +359,10 @@ exports.handler = async function ({ event, constants }, context, callback) {
                 field_value: complexityValue,
             });
         }
-
+        console.log(`[Debug] Raw AssignedTo before normalization: ${safeJson(assignedTo)}`);
         if (assignedTo) {
             let removed_email = assignedTo.replace(/\s*<[^>]*>/g, '');
+            console.log(`[Debug] Normalized AssignedTo for qTest field: ${removed_email}`);
             requestBody.properties.push({
                 field_id: constants.RequirementAssignedToFieldID,
                 field_value: removed_email,
@@ -322,6 +395,10 @@ exports.handler = async function ({ event, constants }, context, callback) {
         }
 
         try {
+            logDivider("CREATE REQUIREMENT");
+            console.log(`[Debug] Target Module ID: ${targetModuleId}`);
+            console.log(`[Debug] Create URL: ${url}`);
+            console.log(`[Debug] Final Create Payload: ${safeJson(requestBody)}`);
             await post(url, requestBody);
             console.log(`[Info] Requirement created.`);
         } catch (error) {
@@ -349,6 +426,9 @@ exports.handler = async function ({ event, constants }, context, callback) {
 
     let workItemId;
     let requirementToUpdate;
+
+    logDivider("RAW INCOMING EVENT");
+    console.log(safeJson(event));
 
     switch (event.eventType) {
         case eventType.CREATED:
@@ -386,7 +466,26 @@ exports.handler = async function ({ event, constants }, context, callback) {
     const requirementDescription = buildRequirementDescription(event);
     const requirementName = buildRequirementName(namePrefix, event);
 
+    logDivider("BUILT REQUIREMENT CONTENT");
+    console.log(`[Debug] Requirement Name: ${requirementName}`);
+    console.log(`[Debug] Requirement Description: ${requirementDescription}`);
+
     const fields = getFields(event);
+
+    logDivider("EXTRACTED ADO FIELDS");
+    console.log(`[Debug] Event Type: ${event.eventType}`);
+    console.log(`[Debug] Work Item Type: ${fields["System.WorkItemType"]}`);
+    console.log(`[Debug] Title: ${fields["System.Title"]}`);
+    console.log(`[Debug] AreaPath: ${fields["System.AreaPath"]}`);
+    console.log(`[Debug] IterationPath: ${fields["System.IterationPath"]}`);
+    console.log(`[Debug] State: ${fields["System.State"]}`);
+    console.log(`[Debug] Reason: ${fields["System.Reason"]}`);
+    console.log(`[Debug] Complexity: ${fields["Custom.Complexity"]}`);
+    console.log(`[Debug] AssignedTo Raw: ${safeJson(fields["System.AssignedTo"])}`);
+    console.log(`[Debug] ApplicationName: ${fields["Custom.ApplicationName"]}`);
+    console.log(`[Debug] FitGap: ${safeJson(getFitGap(event))}`);
+    console.log(`[Debug] BPEntity: ${safeJson(getBPEntity(event))}`);
+
     const adoAreaPath = fields["System.AreaPath"];
     const adoComplexity = fields["Custom.Complexity"];
     const qtestComplexityValue = {

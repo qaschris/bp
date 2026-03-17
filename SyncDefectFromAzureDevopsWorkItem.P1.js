@@ -68,6 +68,40 @@
             // Fallback: sometimes it might already just be a UPN-ish string
             return s || null;
         }
+        
+        async function getAdoComments(workItemId) {
+            const url = `${constants.AzDoProjectURL}/_apis/wit/workitems/${workItemId}/comments?api-version=7.0-preview.3`;
+            const encodedToken = Buffer.from(`:${constants.AZDO_TOKEN}`).toString("base64");
+    
+            try {
+                const response = await axios.get(url, {
+                    headers: { Authorization: `Basic ${encodedToken}` }
+                });
+    
+                return response.data ?.comments || [];
+            } catch (error) {
+                console.log(`[Warn] Failed to fetch ADO comments: ${error.message}`);
+                return [];
+            }
+        }
+
+        function formatDiscussion(comments) {
+        if (!comments || comments.length === 0) return "";
+ 
+        return comments.map(c => {
+            const author = c.createdBy ?.displayName || "Unknown";
+            const date = new Date(c.createdDate).toLocaleString();
+            const text = c.text || "";
+ 
+            return `
+                <div style="margin-bottom:10px;">
+                <strong>${author}</strong>
+                <span style="color:gray;">${date}</span>
+                <div>${text}</div>
+                </div>
+                <hr/>`;
+                        }).join("");
+        }
 
         async function resolveQtestUserIdByUsernameOrUpn(identity, standardHeaders) {
             if (!identity) return null;
@@ -150,6 +184,29 @@
         const defectDescription = buildDefectDescription(event);
         const defectSummary = buildDefectSummary(namePrefix, event);
         const fields = getFields(event);
+
+        // Fetch ADO comments
+        let adoComments = await getAdoComments(workItemId);
+
+        // Optional: prevent loop sync
+        if (constants.SyncUserRegex) {
+            const regex = new RegExp(constants.SyncUserRegex, "i");
+
+            adoComments = adoComments.filter(c =>
+                !regex.test(c.createdBy ?.displayName || "")
+            );
+        }
+        
+        const discussionHtml = formatDiscussion(adoComments);
+ 
+        let qtestDiscussionValue = "";
+        
+            if (discussionHtml) {
+                qtestDiscussionValue = `
+                    <h3>ADO Discussion</h3>
+                    ${discussionHtml}
+                    `;
+            }
 
         // Assigned To: ADO -> qTest (P1). Match users by email/UPN; BP SSO commonly uses username/uniqueName.
         const adoAssignedToRaw = fields[constants.AzDoAssignedToFieldRef || "System.AssignedTo"];
@@ -272,6 +329,14 @@
         const adoActualCloseDate = fields["BP.ERP.ActualClose"];
         let qtestClosedDateValue = null;
 
+        // Get Target Date from ADO and sync to qTest Target Date (date only)
+        const adoTargetDate = fields["Microsoft.VSTS.Scheduling.TargetDate"];
+        let qtestTargetDateValue = null;
+        if (adoTargetDate) {
+            qtestTargetDateValue = new Date(adoTargetDate).toISOString().replace(".000Z", "+00:00");
+            console.log(`[Info] ADO Target Date: '${adoTargetDate}' => qTest Target Date: '${qtestTargetDateValue}'`);
+        }
+
         // Get External Reference from ADO and sync to qTest
         const adoExternalReference = fields["BP.ERP.ExternalReference"] || "";
         console.log(`[Info] ADO External Reference value: '${adoExternalReference}'`);
@@ -323,7 +388,9 @@
                 qtestProposedFixValue,
                 qtestClosedDateValue,
                 qtestResolvedReasonValue,
-                adoAssignedToIdentity
+                adoAssignedToIdentity,
+                qtestTargetDateValue,
+                qtestDiscussionValue
             );
         }
 
@@ -393,7 +460,9 @@
             proposedFixValue,
             closedDateValue,
             resolvedReasonValue,
-            assignedToUserId
+            assignedToUserId,
+            targetDateValue,
+            discussionValue
         ) 
             {
             const defectId = defectToUpdate.id;
@@ -501,6 +570,24 @@
                 console.log(`[Warn] No Resolved Reason provided or mapping not found`);
             }
 
+            // Add TargetDate
+            if (constants.DefectTargetDateFieldID && targetDateValue) {
+                requestBody.properties.push({
+                    field_id: constants.DefectTargetDateFieldID,
+                    field_value: targetDateValue
+                });
+            }
+
+            // Add Discussion (ADO comments) to qTest
+            if (constants.DefectDiscussionFieldID) {
+                requestBody.properties.push({
+                    field_id: constants.DefectDiscussionFieldID,
+                    field_value: discussionValue || ""
+                });
+    
+                console.log(`[Info] Added Discussion to qTest update payload.`);
+            }
+
             // Assigned To (qTest field expects userId; fallback = Blank)
             if (constants.DefectAssignedToFieldID) {
                 requestBody.properties.push({
@@ -572,4 +659,3 @@ async function doqTestRequest(url, method, requestBody) {
             }
         }
     };
- 
