@@ -3,25 +3,25 @@ const axios = require("axios");
 exports.handler = async function ({ event, constants }, context, callback) {
     // --- Helper functions ---
     function getFitGap(eventData) {
-        // UPDATE event → delta fields
         if (eventData.eventType === "workitem.updated") {
             const delta = eventData.resource?.fields?.["BP.ERP.FitGap"];
-            return delta?.newValue || null;
+            if (delta && Object.prototype.hasOwnProperty.call(delta, "newValue")) {
+                return delta.newValue ?? null;
+            }
         }
 
-        // CREATE event → full revision fields
         const fields = getFields(eventData);
-        return fields["BP.ERP.FitGap"] || null;
+        return fields["BP.ERP.FitGap"] ?? null;
     }
 
     function getBPEntity(eventData) {
-        // UPDATE event → delta fields
         if (eventData.eventType === "workitem.updated") {
             const delta = eventData.resource?.fields?.["Custom.Entity"];
-            return delta?.newValue ?? null;
+            if (delta && Object.prototype.hasOwnProperty.call(delta, "newValue")) {
+                return delta.newValue ?? null;
+            }
         }
 
-        // CREATE event → full revision fields
         const fields = getFields(eventData);
         return fields["Custom.Entity"] ?? null;
     }
@@ -33,23 +33,25 @@ exports.handler = async function ({ event, constants }, context, callback) {
 
     function buildRequirementDescription(eventData) {
         const fields = getFields(eventData);
-        return `<a href="${eventData.resource._links.html.href}" target="_blank">Open in Azure DevOps</a>
 
-<b>Type:</b> ${fields["System.WorkItemType"]}
+        const workItemType = fields["System.WorkItemType"] || "";
+        const areaPath = fields["System.AreaPath"] || "";
+        const iterationPath = fields["System.IterationPath"] || "";
+        const state = fields["System.State"] || "";
+        const reason = fields["System.Reason"] || "";
+        const complexity = fields["Custom.Complexity"] || "";
+        const acceptanceCriteria = fields["Microsoft.VSTS.Common.AcceptanceCriteria"] || "";
+        const description = fields["System.Description"] || "";
 
-<b>Area:</b> ${fields["System.AreaPath"]}
-
-<b>Iteration:</b> ${fields["System.IterationPath"]}
-
-<b>State:</b> ${fields["System.State"]}
-
-<b>Reason:</b> ${fields["System.Reason"]}
-
-<b>Complexity:</b> ${fields["Custom.Complexity"] || ""}
- 
-<b>Acceptance Criteria:</b> ${fields["Microsoft.VSTS.Common.AcceptanceCriteria"]}
-
-<b>Description:</b> ${fields["System.Description"] || ""}`;
+        return `<a href="${eventData.resource._links.html.href}" target="_blank">Open in Azure DevOps</a><br>
+    <b>Type:</b> ${workItemType}<br>
+    <b>Area:</b> ${areaPath}<br>
+    <b>Iteration:</b> ${iterationPath}<br>
+    <b>State:</b> ${state}<br>
+    <b>Reason:</b> ${reason}<br>
+    <b>Complexity:</b> ${complexity}<br>
+    <b>Acceptance Criteria:</b> ${acceptanceCriteria}<br>
+    <b>Description:</b> ${description}`;
     }
 
     function buildRequirementName(namePrefix, eventData) {
@@ -315,18 +317,20 @@ exports.handler = async function ({ event, constants }, context, callback) {
                 field_id: constants.RequirementApplicationNameFieldID,
                 field_value: applicationName,
             });
-            if (fitGap !== null && fitGap !== undefined) {
-                requestBody.properties.push({
-                    field_id: constants.RequirementFitGapFieldID,
-                    field_value: fitGap
-                });
-            }
-            if (bpEntity !== null && bpEntity !== undefined) {
-                requestBody.properties.push({
-                    field_id: constants.RequirementBPEntityFieldID,
-                    field_value: bpEntity
-                });
-            }
+        }
+
+        if (fitGap !== null && fitGap !== undefined) {
+            requestBody.properties.push({
+                field_id: constants.RequirementFitGapFieldID,
+                field_value: fitGap
+            });
+        }
+
+        if (bpEntity !== null && bpEntity !== undefined) {
+            requestBody.properties.push({
+                field_id: constants.RequirementBPEntityFieldID,
+                field_value: bpEntity
+            });
         }
 
         try {
