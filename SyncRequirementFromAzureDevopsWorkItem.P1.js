@@ -156,6 +156,33 @@ exports.handler = async function ({ event, constants }, context, callback) {
             .filter(Boolean);
     }
 
+    function getReleaseFolderName(iterationPath) {
+        if (!iterationPath) {
+            return "TBD";
+        }
+
+        const segments = String(iterationPath)
+            .split(/[\\/]+/)
+            .map(s => s.trim())
+            .filter(Boolean);
+
+        // Usually the release indicator is in the second node, e.g.
+        // bp_Quantum\P_O R1.0 (Castellon and Kwinana)
+        // bp_Quantum\P_O R1.1 Whiting
+        const candidate = segments.length > 1 ? segments[1] : segments[0];
+
+        if (!candidate) {
+            return "TBD";
+        }
+
+        const match = candidate.match(/P_O\s+R(\d+(?:\.\d+)?)/i);
+        if (match && match[1]) {
+            return `P&O Release ${match[1]}`;
+        }
+
+        return "TBD";
+    }
+
     async function getSubModules(parentId) {
         const cacheKey = String(parentId);
         if (moduleChildrenCache[cacheKey]) {
@@ -209,21 +236,34 @@ exports.handler = async function ({ event, constants }, context, callback) {
         }
     }
 
-    async function ensureModulePath(areaPath) {
-        const segments = normalizeAreaPathSegments(areaPath);
+    async function ensureModulePath(areaPath, iterationPath) {
+        const releaseFolderName = getReleaseFolderName(iterationPath);
+
+        let areaSegments = normalizeAreaPathSegments(areaPath);
+
+        // Drop the first AreaPath node if it is the project root (bp_Quantum),
+        // because the release folder replaces that top-level bucket.
+        if (areaSegments.length && areaSegments[0].toLowerCase() === "bp_quantum") {
+            areaSegments = areaSegments.slice(1);
+        }
+
+        const segments = [releaseFolderName, ...areaSegments];
         let currentParentId = constants.RequirementParentID;
 
         if (!segments.length) {
-            console.log(`[Info] AreaPath missing or blank. Using RequirementParentID '${currentParentId}'.`);
+            console.log(`[Info] No module segments resolved. Using RequirementParentID '${currentParentId}'.`);
             return currentParentId;
         }
 
-        console.log(`[Info] Resolving qTest module path from ADO AreaPath '${areaPath}'.`);
+        console.log(`[Info] Resolving qTest module path from IterationPath '${iterationPath}' and AreaPath '${areaPath}'.`);
+        console.log(`[Info] Derived release folder: '${releaseFolderName}'.`);
+        console.log(`[Info] Final module path segments: ${safeJson(segments)}`);
 
         for (const segment of segments) {
             const children = await getSubModules(currentParentId);
             console.log(`[Debug] Looking for segment '${segment}' under parent '${currentParentId}'.`);
             console.log(`[Debug] Children of ${currentParentId}: ${children.map(c => `${c.name} (${c.id})`).join(", ")}`);
+
             const existing = children.find(m =>
                 ((m?.name || "").trim().toLowerCase() === segment.toLowerCase())
             );
@@ -242,7 +282,7 @@ exports.handler = async function ({ event, constants }, context, callback) {
             }
         }
 
-        console.log(`[Info] Resolved qTest target module id '${currentParentId}' for AreaPath '${areaPath}'.`);
+        console.log(`[Info] Resolved qTest target module id '${currentParentId}' for release '${releaseFolderName}' and AreaPath '${areaPath}'.`);
         return currentParentId;
     }
 
@@ -505,8 +545,7 @@ exports.handler = async function ({ event, constants }, context, callback) {
     const applicationName = fields["Custom.ApplicationName"] || null;
     const fitGap = getFitGap(event);
     const bpEntity = getBPEntity(event);
-    const targetModuleId = await ensureModulePath(adoAreaPath);
-
+    const targetModuleId = await ensureModulePath(adoAreaPath, iterationPath);
 
     if (requirementToUpdate) {
         await updateRequirement(requirementToUpdate, requirementName, requirementDescription, adoAreaPath, qtestComplexityValue, adoAssignedTo, iterationPath, applicationName, fitGap, bpEntity, targetModuleId);
