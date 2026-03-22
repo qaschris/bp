@@ -44,14 +44,14 @@ exports.handler = async function ({ event, constants }, context, callback) {
         const description = fields["System.Description"] || "";
 
         return `<a href="${eventData.resource._links.html.href}" target="_blank">Open in Azure DevOps</a><br>
-    <b>Type:</b> ${workItemType}<br>
-    <b>Area:</b> ${areaPath}<br>
-    <b>Iteration:</b> ${iterationPath}<br>
-    <b>State:</b> ${state}<br>
-    <b>Reason:</b> ${reason}<br>
-    <b>Complexity:</b> ${complexity}<br>
-    <b>Acceptance Criteria:</b> ${acceptanceCriteria}<br>
-    <b>Description:</b> ${description}`;
+                <b>Type:</b> ${workItemType}<br>
+                <b>Area:</b> ${areaPath}<br>
+                <b>Iteration:</b> ${iterationPath}<br>
+                <b>State:</b> ${state}<br>
+                <b>Reason:</b> ${reason}<br>
+                <b>Complexity:</b> ${complexity}<br>
+                <b>Acceptance Criteria:</b> ${acceptanceCriteria}<br>
+                <b>Description:</b> ${description}`;
     }
 
     function buildRequirementName(namePrefix, eventData) {
@@ -337,6 +337,26 @@ exports.handler = async function ({ event, constants }, context, callback) {
                 field_value: complexityValue,
             });
         }
+        if (workItemTypeValue) {
+            requestBody.properties.push({
+                field_id: constants.RequirementWorkItemTypeFieldID,
+                field_value: workItemTypeValue,
+            });
+        }
+
+        if (priorityValue) {
+            requestBody.properties.push({
+                field_id: constants.RequirementPriorityFieldID,
+                field_value: priorityValue,
+            });
+        }
+
+        if (typeValue) {
+            requestBody.properties.push({
+                field_id: constants.RequirementTypeFieldID,
+                field_value: typeValue,
+            });
+        }
         console.log(`[Debug] Raw AssignedTo before normalization: ${safeJson(assignedTo)}`);
         if (assignedTo) {
             let removed_email = assignedTo.replace(/\s*<[^>]*>/g, '');
@@ -386,7 +406,7 @@ exports.handler = async function ({ event, constants }, context, callback) {
         }
     }
 
-    async function createRequirement(name, description, areaPath, complexityValue, assignedTo, iterationPath, applicationName, fitGap, bpEntity, targetModuleId) {
+    async function createRequirement(name, description, areaPath, complexityValue, workItemTypeValue, priorityValue, typeValue, assignedTo, iterationPath, applicationName, fitGap, bpEntity, targetModuleId) {
         const url = `https://${constants.ManagerURL}/api/v3/projects/${constants.ProjectID}/requirements`;
         const requestBody = {
             name,
@@ -401,6 +421,26 @@ exports.handler = async function ({ event, constants }, context, callback) {
             requestBody.properties.push({
                 field_id: constants.RequirementComplexityFieldID,
                 field_value: complexityValue,
+            });
+        }
+        if (workItemTypeValue) {
+            requestBody.properties.push({
+                field_id: constants.RequirementWorkItemTypeFieldID,
+                field_value: workItemTypeValue,
+            });
+        }
+
+        if (priorityValue) {
+            requestBody.properties.push({
+                field_id: constants.RequirementPriorityFieldID,
+                field_value: priorityValue,
+            });
+        }
+
+        if (typeValue) {
+            requestBody.properties.push({
+                field_id: constants.RequirementTypeFieldID,
+                field_value: typeValue,
             });
         }
         console.log(`[Debug] Raw AssignedTo before normalization: ${safeJson(assignedTo)}`);
@@ -540,6 +580,33 @@ exports.handler = async function ({ event, constants }, context, callback) {
         "5 - Very Low": 945,
     }[adoComplexity] || null;
 
+    const adoWorkItemType = fields["System.WorkItemType"] || null;
+    const qtestWorkItemTypeValue = {
+        "Requirement": 1358,
+    }[adoWorkItemType] || null;
+
+    const adoPriority = fields["Microsoft.VSTS.Common.Priority"];
+    const qtestPriorityValue = {
+        1: 11355,
+        2: 11356,
+        3: 11357,
+        4: 11358,
+    }[adoPriority] || null;
+
+    const adoRequirementCategory = fields["Custom.RequirementCategory"] || null;
+    const qtestTypeValue = {
+        "AI Deliverable": 11333,
+        "Business Risk": 11334,
+        "Business Value": 11335,
+        "Control": 11336,
+        "Demo": 11337,
+        "Legal": 11338,
+        "Regulatory or Business Critical": 11339,
+        "Security": 11340,
+        "Statutory": 11341,
+        "Tax": 11342,
+    }[adoRequirementCategory] || null;
+
     const adoAssignedTo = fields["System.AssignedTo"];
     const iterationPath = fields["System.IterationPath"] || null;
     const applicationName = fields["Custom.ApplicationName"] || null;
@@ -548,9 +615,39 @@ exports.handler = async function ({ event, constants }, context, callback) {
     const targetModuleId = await ensureModulePath(adoAreaPath, iterationPath);
 
     if (requirementToUpdate) {
-        await updateRequirement(requirementToUpdate, requirementName, requirementDescription, adoAreaPath, qtestComplexityValue, adoAssignedTo, iterationPath, applicationName, fitGap, bpEntity, targetModuleId);
+        await updateRequirement(
+            requirementToUpdate,
+            requirementName,
+            requirementDescription,
+            adoAreaPath,
+            qtestComplexityValue,
+            qtestWorkItemTypeValue,
+            qtestPriorityValue,
+            qtestTypeValue,
+            adoAssignedTo,
+            iterationPath,
+            applicationName,
+            fitGap,
+            bpEntity,
+            targetModuleId
+        );
     } else {
-        await createRequirement(requirementName, requirementDescription, adoAreaPath, qtestComplexityValue, adoAssignedTo, iterationPath, applicationName, fitGap, bpEntity, targetModuleId);
+        await updateRequirement(
+            requirementToUpdate,
+            requirementName,
+            requirementDescription,
+            adoAreaPath,
+            qtestComplexityValue,
+            qtestWorkItemTypeValue,
+            qtestPriorityValue,
+            qtestTypeValue,
+            adoAssignedTo,
+            iterationPath,
+            applicationName,
+            fitGap,
+            bpEntity,
+            targetModuleId
+        );
     }
 };
  
