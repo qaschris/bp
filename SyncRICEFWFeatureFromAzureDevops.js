@@ -48,6 +48,30 @@ exports.handler = async function ({ event, constants }, context, callback) {
             .filter(Boolean);
     }
 
+    function getReleaseFolderName(iterationPath) {
+        if (!iterationPath) {
+            return "TBD";
+        }
+
+        const segments = String(iterationPath)
+            .split(/[\\/]+/)
+            .map(s => s.trim())
+            .filter(Boolean);
+
+        const candidate = segments.length > 1 ? segments[1] : segments[0];
+
+        if (!candidate) {
+            return "TBD";
+        }
+
+        const match = candidate.match(/P_O\s+R(\d+(?:\.\d+)?)/i);
+        if (match && match[1]) {
+            return `P&O Release ${match[1]}`;
+        }
+
+        return "TBD";
+    }
+
     function isRicefwFeature(eventData) {
         const fields = getFields(eventData);
         const workItemType = (fields["System.WorkItemType"] || "").toString().trim();
@@ -62,8 +86,16 @@ exports.handler = async function ({ event, constants }, context, callback) {
 
     function buildRequirementDescription(eventData) {
         const fields = getFields(eventData);
+
+        const workItemType = fields["System.WorkItemType"] || "";
+        const areaPath = fields["System.AreaPath"] || "";
+        const iterationPath = fields["System.IterationPath"] || "";
+        const state = fields["System.State"] || "";
+        const reason = fields["System.Reason"] || "";
+        const complexity = fields["Custom.Complexity"] || "";
         const acceptanceCriteria = fields["Microsoft.VSTS.Common.AcceptanceCriteria"] || "";
         const description = fields["System.Description"] || "";
+
         const featureType = fields[constants.AzDoRicefwFeatureTypeFieldRef || "Custom.FeatureType"] || "";
         const processRelease = fields[constants.AzDoRicefwProcessReleaseFieldRef || "Custom.ProcessRelease"] || "";
         const ricefwId = fields[constants.AzDoRicefwIdFieldRef || "Custom.RICEFWID"] || "";
@@ -71,37 +103,22 @@ exports.handler = async function ({ event, constants }, context, callback) {
         const testingStatus = fields[constants.AzDoRicefwTestingStatusFieldRef || "Custom.TestingStatus"] || "";
         const area = fields[constants.AzDoRicefwAreaFieldRef || "Custom.Area"] || "";
 
-        return `<a href="${eventData.resource._links.html.href}" target="_blank">Open in Azure DevOps</a>
-
-<b>Type:</b> ${fields["System.WorkItemType"] || ""}
-
-<b>Feature Type:</b> ${featureType}
-
-<b>RICEFW ID:</b> ${ricefwId}
-
-<b>Area:</b> ${area}
-
-<b>Area Path:</b> ${fields["System.AreaPath"] || ""}
-
-<b>Iteration:</b> ${fields["System.IterationPath"] || ""}
-
-<b>State:</b> ${fields["System.State"] || ""}
-
-<b>Reason:</b> ${fields["System.Reason"] || ""}
-
-<b>Testing Status:</b> ${testingStatus}
-
-<b>Complexity:</b> ${fields["Custom.Complexity"] || ""}
-
-<b>Process Release:</b> ${processRelease}
-
-<b>RICEFW / Configuration:</b> ${ricefwConfiguration}
-
-<b>Assigned To:</b> ${normalizeAssignedTo(fields["System.AssignedTo"])}
-
-<b>Acceptance Criteria:</b> ${acceptanceCriteria}
-
-<b>Description:</b> ${description}`;
+        return `<a href="${eventData.resource._links.html.href}" target="_blank">Open in Azure DevOps</a><br>
+                <b>Type:</b> ${workItemType}<br>
+                <b>Feature Type:</b> ${featureType}<br>
+                <b>RICEFW ID:</b> ${ricefwId}<br>
+                <b>Area:</b> ${area}<br>
+                <b>Area Path:</b> ${areaPath}<br>
+                <b>Iteration:</b> ${iterationPath}<br>
+                <b>State:</b> ${state}<br>
+                <b>Reason:</b> ${reason}<br>
+                <b>Testing Status:</b> ${testingStatus}<br>
+                <b>Complexity:</b> ${complexity}<br>
+                <b>Process Release:</b> ${processRelease}<br>
+                <b>RICEFW / Configuration:</b> ${ricefwConfiguration}<br>
+                <b>Assigned To:</b> ${normalizeAssignedTo(fields["System.AssignedTo"])}<br>
+                <b>Acceptance Criteria:</b> ${acceptanceCriteria}<br>
+                <b>Description:</b> ${description}`;
     }
 
     // --- HTTP helpers ---
@@ -139,21 +156,36 @@ exports.handler = async function ({ event, constants }, context, callback) {
     async function getSubModules(parentId) {
         const cacheKey = String(parentId);
         if (moduleChildrenCache[cacheKey]) {
+            console.log(`[Debug] getSubModules cache hit for parent '${parentId}'.`);
+            console.log(`[Debug] Cached children: ${moduleChildrenCache[cacheKey].map(c => `${c.name} (${c.id})`).join(", ")}`);
             return moduleChildrenCache[cacheKey];
         }
 
         const url = `https://${constants.ManagerURL}/api/v3/projects/${constants.ProjectID}/modules/${parentId}?expand=descendants`;
-        const response = await doRequest(url, "GET", null);
-        const items = Array.isArray(response)
-            ? response
-            : Array.isArray(response?.items)
-                ? response.items
-                : Array.isArray(response?.data)
-                    ? response.data
-                    : [];
 
-        moduleChildrenCache[cacheKey] = items;
-        return items;
+        try {
+            const response = await doRequest(url, "GET", null);
+
+            let items = [];
+            if (Array.isArray(response?.children)) {
+                items = response.children;
+            } else if (Array.isArray(response)) {
+                items = response;
+            } else if (Array.isArray(response?.items)) {
+                items = response.items;
+            } else if (Array.isArray(response?.data)) {
+                items = response.data;
+            }
+
+            console.log(`[Debug] getSubModules parent '${parentId}' resolved ${items.length} immediate children.`);
+            console.log(`[Debug] Children: ${items.map(c => `${c.name} (${c.id})`).join(", ")}`);
+
+            moduleChildrenCache[cacheKey] = items;
+            return items;
+        } catch (error) {
+            console.log(`[Error] Failed to get sub-modules for parent '${parentId}'.`, error);
+            throw error;
+        }
     }
 
     async function createModule(name, parentId) {
@@ -169,18 +201,31 @@ exports.handler = async function ({ event, constants }, context, callback) {
         return created;
     }
 
-    async function ensureModulePath(rootModuleId, areaPath) {
-        const segments = normalizeAreaPathSegments(areaPath);
+    async function ensureModulePath(rootModuleId, areaPath, iterationPath) {
+        const releaseFolderName = getReleaseFolderName(iterationPath);
+
+        let areaSegments = normalizeAreaPathSegments(areaPath);
+
+        if (areaSegments.length && areaSegments[0].toLowerCase() === "bp_quantum") {
+            areaSegments = areaSegments.slice(1);
+        }
+
+        const segments = [releaseFolderName, ...areaSegments];
         let currentParentId = rootModuleId;
 
         if (!segments.length) {
-            console.log(`[Info] AreaPath missing or blank. Using root module '${currentParentId}'.`);
+            console.log(`[Info] No module segments resolved. Using root module '${currentParentId}'.`);
             return currentParentId;
         }
 
+        console.log(`[Info] Resolving qTest module path from IterationPath '${iterationPath}' and AreaPath '${areaPath}'.`);
+        console.log(`[Info] Derived release folder: '${releaseFolderName}'.`);
+
         for (const segment of segments) {
             const children = await getSubModules(currentParentId);
-            const existing = children.find(m => ((m?.name || "").trim().toLowerCase() === segment.toLowerCase()));
+            const existing = children.find(m =>
+                ((m?.name || "").trim().toLowerCase() === segment.toLowerCase())
+            );
 
             if (existing) {
                 currentParentId = existing.id;
@@ -253,7 +298,7 @@ exports.handler = async function ({ event, constants }, context, callback) {
         return { failed, requirement };
     }
 
-    async function updateRequirement(requirementToUpdate, name, description, fields, targetModuleId) {
+    async function updateRequirement(requirementToUpdate, name, description, fields, complexityValue, workItemTypeValue, priorityValue, typeValue, targetModuleId) {
         const requirementId = requirementToUpdate.id;
         const url = `https://${constants.ManagerURL}/api/v3/projects/${constants.ProjectID}/requirements/${requirementId}?parentId=${targetModuleId}`;
         const requestBody = {
@@ -262,7 +307,6 @@ exports.handler = async function ({ event, constants }, context, callback) {
         };
 
         const areaPath = fields["System.AreaPath"] || "";
-        const complexityValue = fields["Custom.Complexity"] || null;
         const assignedTo = normalizeAssignedTo(fields["System.AssignedTo"]);
         const iterationPath = fields["System.IterationPath"] || null;
         const state = fields["System.State"] || null;
@@ -284,6 +328,15 @@ exports.handler = async function ({ event, constants }, context, callback) {
 
         if (constants.RequirementComplexityFieldID && complexityValue) {
             requestBody.properties.push({ field_id: constants.RequirementComplexityFieldID, field_value: complexityValue });
+        }
+        if (constants.RequirementWorkItemTypeFieldID && workItemTypeValue) {
+            requestBody.properties.push({ field_id: constants.RequirementWorkItemTypeFieldID, field_value: workItemTypeValue });
+        }
+        if (constants.RequirementPriorityFieldID && priorityValue) {
+            requestBody.properties.push({ field_id: constants.RequirementPriorityFieldID, field_value: priorityValue });
+        }
+        if (constants.RequirementTypeFieldID && typeValue) {
+            requestBody.properties.push({ field_id: constants.RequirementTypeFieldID, field_value: typeValue });
         }
         if (constants.RequirementAssignedToFieldID && assignedTo) {
             requestBody.properties.push({ field_id: constants.RequirementAssignedToFieldID, field_value: assignedTo });
@@ -341,7 +394,7 @@ exports.handler = async function ({ event, constants }, context, callback) {
         }
     }
 
-    async function createRequirement(name, description, fields, targetModuleId) {
+    async function createRequirement(name, description, fields, complexityValue, workItemTypeValue, priorityValue, typeValue, targetModuleId) {
         const url = `https://${constants.ManagerURL}/api/v3/projects/${constants.ProjectID}/requirements`;
         const requestBody = {
             name,
@@ -350,7 +403,6 @@ exports.handler = async function ({ event, constants }, context, callback) {
         };
 
         const areaPath = fields["System.AreaPath"] || "";
-        const complexityValue = fields["Custom.Complexity"] || null;
         const assignedTo = normalizeAssignedTo(fields["System.AssignedTo"]);
         const iterationPath = fields["System.IterationPath"] || null;
         const state = fields["System.State"] || null;
@@ -372,6 +424,15 @@ exports.handler = async function ({ event, constants }, context, callback) {
 
         if (constants.RequirementComplexityFieldID && complexityValue) {
             requestBody.properties.push({ field_id: constants.RequirementComplexityFieldID, field_value: complexityValue });
+        }
+        if (constants.RequirementWorkItemTypeFieldID && workItemTypeValue) {
+            requestBody.properties.push({ field_id: constants.RequirementWorkItemTypeFieldID, field_value: workItemTypeValue });
+        }
+        if (constants.RequirementPriorityFieldID && priorityValue) {
+            requestBody.properties.push({ field_id: constants.RequirementPriorityFieldID, field_value: priorityValue });
+        }
+        if (constants.RequirementTypeFieldID && typeValue) {
+            requestBody.properties.push({ field_id: constants.RequirementTypeFieldID, field_value: typeValue });
         }
         if (constants.RequirementAssignedToFieldID && assignedTo) {
             requestBody.properties.push({ field_id: constants.RequirementAssignedToFieldID, field_value: assignedTo });
@@ -488,15 +549,59 @@ exports.handler = async function ({ event, constants }, context, callback) {
 
     const fields = getFields(event);
     const adoAreaPath = fields["System.AreaPath"] || "";
+    const adoComplexity = fields["Custom.Complexity"];
+    const qtestComplexityValue = {
+        "1 - Very High": 941,
+        "2 - High": 942,
+        "3 - Medium": 943,
+        "4 - Low": 944,
+        "5 - Very Low": 945,
+    }[adoComplexity] || null;
+
+    const qtestWorkItemTypeValue = 1359;
+
+    const adoPriority = fields["Microsoft.VSTS.Common.Priority"];
+    const qtestPriorityValue = {
+        1: 11355,
+        2: 11356,
+        3: 11357,
+        4: 11358,
+    }[adoPriority] || null;
+
+    const adoRequirementCategory = fields["Custom.RequirementCategory"] || null;
+    const qtestTypeValue = {
+        "Change Request": 11369,
+        "RICEFW": 11370,
+    }[adoRequirementCategory] || null;
     const rootModuleId = await ensureRicefwRootModule();
-    const targetModuleId = await ensureModulePath(rootModuleId, adoAreaPath);
+    const iterationPath = fields["System.IterationPath"] || null;
+    const targetModuleId = await ensureModulePath(rootModuleId, adoAreaPath, iterationPath);
     const namePrefix = getNamePrefix(workItemId);
     const requirementDescription = buildRequirementDescription(event);
     const requirementName = buildRequirementName(namePrefix, event);
 
     if (requirementToUpdate) {
-        await updateRequirement(requirementToUpdate, requirementName, requirementDescription, fields, targetModuleId);
+        await updateRequirement(
+            requirementToUpdate,
+            requirementName,
+            requirementDescription,
+            fields,
+            qtestComplexityValue,
+            qtestWorkItemTypeValue,
+            qtestPriorityValue,
+            qtestTypeValue,
+            targetModuleId
+        );
     } else {
-        await createRequirement(requirementName, requirementDescription, fields, targetModuleId);
+        await createRequirement(
+            requirementName,
+            requirementDescription,
+            fields,
+            qtestComplexityValue,
+            qtestWorkItemTypeValue,
+            qtestPriorityValue,
+            qtestTypeValue,
+            targetModuleId
+        );
     }
 };
