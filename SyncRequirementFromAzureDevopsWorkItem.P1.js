@@ -322,7 +322,8 @@ exports.handler = async function ({ event, constants }, context, callback) {
         return { failed, requirement };
     }
 
-    async function updateRequirement(requirementToUpdate, name, description, areaPath, complexityValue, assignedTo, iterationPath, applicationName, fitGap, bpEntity, targetModuleId) {        const requirementId = requirementToUpdate.id;
+    async function updateRequirement(requirementToUpdate, name, description, areaPath, complexityValue, workItemTypeValue, priorityValue, typeValue, assignedTo, iterationPath, applicationName, fitGap, bpEntity, targetModuleId) {
+        const requirementId = requirementToUpdate.id;
         const url = `https://${constants.ManagerURL}/api/v3/projects/${constants.ProjectID}/requirements/${requirementId}?parentId=${targetModuleId}`;        const requestBody = {
             name,
             properties: [
@@ -632,8 +633,7 @@ exports.handler = async function ({ event, constants }, context, callback) {
             targetModuleId
         );
     } else {
-        await updateRequirement(
-            requirementToUpdate,
+        await createRequirement(
             requirementName,
             requirementDescription,
             adoAreaPath,
