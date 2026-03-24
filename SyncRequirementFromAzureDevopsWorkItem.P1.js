@@ -77,6 +77,38 @@ exports.handler = async function ({ event, constants }, context, callback) {
         }
     }
 
+    function normalizeAssignedTo(value) {
+        if (!value) return "";
+
+        if (typeof value === "object") {
+            value =
+                value.displayName ||
+                value.name ||
+                value.uniqueName ||
+                value.mail ||
+                value.email ||
+                "";
+        }
+
+        if (typeof value !== "string") {
+            return "";
+        }
+
+        let cleaned = value
+            .replace(/\s*<[^>]*>/g, "")   // remove <email>
+            .replace(/\s*\([^)]*\)/g, "") // remove (organization)
+            .trim();
+
+        const commaMatch = cleaned.match(/^([^,]+),\s*(.+)$/);
+        if (commaMatch) {
+            const lastName = commaMatch[1].replace(/_/g, " ").trim();
+            const firstName = commaMatch[2].replace(/_/g, " ").trim();
+            return `${firstName} ${lastName}`.trim();
+        }
+
+        return cleaned.replace(/_/g, " ").trim();
+    }
+
     function logDivider(title) {
         console.log(`==================== ${title} ====================`);
     }
@@ -360,7 +392,7 @@ exports.handler = async function ({ event, constants }, context, callback) {
         }
         console.log(`[Debug] Raw AssignedTo before normalization: ${safeJson(assignedTo)}`);
         if (assignedTo) {
-            let removed_email = assignedTo.replace(/\s*<[^>]*>/g, '');
+            let removed_email = normalizeAssignedTo(assignedTo);
             console.log(`[Debug] Normalized AssignedTo for qTest field: ${removed_email}`);
             requestBody.properties.push({
                 field_id: constants.RequirementAssignedToFieldID,
@@ -446,7 +478,7 @@ exports.handler = async function ({ event, constants }, context, callback) {
         }
         console.log(`[Debug] Raw AssignedTo before normalization: ${safeJson(assignedTo)}`);
         if (assignedTo) {
-            let removed_email = assignedTo.replace(/\s*<[^>]*>/g, '');
+            let removed_email = normalizeAssignedTo(assignedTo);
             console.log(`[Debug] Normalized AssignedTo for qTest field: ${removed_email}`);
             requestBody.properties.push({
                 field_id: constants.RequirementAssignedToFieldID,
