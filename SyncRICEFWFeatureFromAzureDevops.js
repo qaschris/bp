@@ -368,7 +368,7 @@ exports.handler = async function ({ event, constants }, context, callback) {
         }
         if (constants.RequirementApplicationNameFieldID && applicationName) {
             requestBody.properties.push({ field_id: constants.RequirementApplicationNameFieldID, field_value: applicationName });
-        })
+        }
 
         // RICEFW-specific fields (optional constants)
         if (constants.RequirementStateFieldID && state) {
