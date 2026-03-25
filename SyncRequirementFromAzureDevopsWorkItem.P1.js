@@ -96,15 +96,7 @@ exports.handler = async function ({ event, constants }, context, callback) {
 
         let cleaned = value
             .replace(/\s*<[^>]*>/g, "")   // remove <email>
-            .replace(/\s*\([^)]*\)/g, "") // remove (organization)
             .trim();
-
-        const commaMatch = cleaned.match(/^([^,]+),\s*(.+)$/);
-        if (commaMatch) {
-            const lastName = commaMatch[1].replace(/_/g, " ").trim();
-            const firstName = commaMatch[2].replace(/_/g, " ").trim();
-            return `${firstName} ${lastName}`.trim();
-        }
 
         return cleaned.replace(/_/g, " ").trim();
     }

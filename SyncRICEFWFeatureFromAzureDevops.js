@@ -40,15 +40,7 @@ exports.handler = async function ({ event, constants }, context, callback) {
 
         let cleaned = value
             .replace(/\s*<[^>]*>/g, "")   // remove <email>
-            .replace(/\s*\([^)]*\)/g, "") // remove (organization)
             .trim();
-
-        const commaMatch = cleaned.match(/^([^,]+),\s*(.+)$/);
-        if (commaMatch) {
-            const lastName = commaMatch[1].replace(/_/g, " ").trim();
-            const firstName = commaMatch[2].replace(/_/g, " ").trim();
-            return `${firstName} ${lastName}`.trim();
-        }
 
         return cleaned.replace(/_/g, " ").trim();
     }
@@ -89,19 +81,21 @@ exports.handler = async function ({ event, constants }, context, callback) {
         const fields = getFields(eventData);
         const workItemType = (fields["System.WorkItemType"] || "").toString().trim();
         const featureType = (fields["Custom.BPFeatureType"] || "").toString().trim();
-        const ricefwCongiguration = (fields["BP.ERP.RICEFW"] || "").toString().trim();
+        const ricefwConfiguration = (fields["BP.ERP.RICEFW"] || "").toString().trim();
         const featureState = (fields["System.State"] || "").toString().trim();
-        console.log(`[Debug] Evaluating if work item is a RICEFW Feature: WorkItemType='${workItemType}', FeatureType='${featureType}', RICEFWConfiguration='${ricefwCongiguration}', State='${featureState}'`);
-        return workItemType.toLowerCase() === "feature" 
+        console.log(`[Debug] Evaluating if work item is a RICEFW Feature: WorkItemType='${workItemType}', FeatureType='${featureType}', RICEFWConfiguration='${ricefwConfiguration}', State='${featureState}'`);
+        const isRicefwFeature = workItemType.toLowerCase() === "feature" 
             && (featureType.toLowerCase() === "ricefw" 
                 || featureType.toLowerCase() === "change request") 
-            && (ricefwCongiguration.toLowerCase() === "Enhancement"
-                || ricefwCongiguration.toLowerCase() === "Form"
-                || ricefwCongiguration.toLowerCase() === "Interface"
-                || ricefwCongiguration.toLowerCase() === "Report"
-                || ricefwCongiguration.toLowerCase() === "Workflow")
+            && (ricefwConfiguration.toLowerCase() === "enhancement"
+                || ricefwConfiguration.toLowerCase() === "form"
+                || ricefwConfiguration.toLowerCase() === "interface"
+                || ricefwConfiguration.toLowerCase() === "report"
+                || ricefwConfiguration.toLowerCase() === "workflow")
             && (featureState.toLowerCase() !== "rejected"
                 && featureState.toLowerCase() !== "cancelled");
+        console.log(`[Debug] '${isRicefwFeature}' - Work item ${isRicefwFeature ? "meets" : "does not meet"} criteria for RICEFW Feature.`);
+        return isRicefwFeature;
     }
 
     function buildRequirementName(namePrefix, eventData) {
@@ -121,7 +115,7 @@ exports.handler = async function ({ event, constants }, context, callback) {
         const acceptanceCriteria = fields["Microsoft.VSTS.Common.AcceptanceCriteria"] || "";
         const description = fields["System.Description"] || "";
 
-        const featureType = fields[constants.AzDoRicefwFeatureTypeFieldRef || "Custom.FeatureType"] || "";
+        const featureType = fields[constants.AzDoRicefwFeatureTypeFieldRef || "Custom.BPFeatureType"] || "";
         const processRelease = fields[constants.AzDoRicefwProcessReleaseFieldRef || "Custom.ProcessRelease"] || "";
         const ricefwId = fields[constants.AzDoRicefwIdFieldRef || "Custom.RICEFWID"] || "";
         const ricefwConfiguration = fields[constants.AzDoRicefwConfigurationFieldRef || "Custom.RICEFWConfiguration"] || "";
@@ -267,31 +261,6 @@ exports.handler = async function ({ event, constants }, context, callback) {
         return currentParentId;
     }
 
-    async function ensureRicefwRootModule() {
-        if (constants.RicefwRootModuleID) {
-            return constants.RicefwRootModuleID;
-        }
-
-        if (!constants.FeatureParentID) {
-            throw new Error("Either RicefwRootModuleID or FeatureParentID must be provided.");
-        }
-
-        const rootName = constants.RicefwRootModuleName || "RICEFW";
-        const children = await getSubModules(constants.FeatureParentID);
-        const existing = children.find(m => ((m?.name || "").trim().toLowerCase() === rootName.toLowerCase()));
-        if (existing) {
-            console.log(`[Info] Reusing RICEFW root module '${rootName}' (id: ${existing.id}).`);
-            return existing.id;
-        }
-
-        const created = await createModule(rootName, constants.FeatureParentID);
-        const rootId = created?.id;
-        if (!rootId) {
-            throw new Error(`RICEFW root module '${rootName}' did not return an id.`);
-        }
-        return rootId;
-    }
-
     // --- Requirement CRUD ---
     async function getRequirementByWorkItemId(workItemId) {
         const prefix = getNamePrefix(workItemId);
@@ -338,13 +307,13 @@ exports.handler = async function ({ event, constants }, context, callback) {
         const reason = fields["System.Reason"] || null;
         const acceptanceCriteria = fields["Microsoft.VSTS.Common.AcceptanceCriteria"] || "";
         const fullDescription = fields["System.Description"] || "";
-        const applicationName = fields[constants.AzDoApplicationNameFieldRef || "Custom.ApplicationName"] || null;
-        const processRelease = fields[constants.AzDoRicefwProcessReleaseFieldRef || "Custom.ProcessRelease"] || null;
-        const ricefwId = fields[constants.AzDoRicefwIdFieldRef || "Custom.RICEFWID"] || null;
-        const ricefwConfiguration = fields[constants.AzDoRicefwConfigurationFieldRef || "BP.ERP.RICEFW"] || null;
-        const testingStatus = fields[constants.AzDoRicefwTestingStatusFieldRef || "Custom.TestingStatus"] || null;
-        const featureType = fields[constants.AzDoRicefwFeatureTypeFieldRef || "Custom.FeatureType"] || null;
-        const area = fields[constants.AzDoRicefwAreaFieldRef || "Custom.Area"] || null;
+        const applicationName = fields["Custom.ApplicationName"] || null;
+        const processRelease = fields["Custom.ProcessRelease"] || null;
+        const ricefwId = fields["Custom.RICEFWID"] || null;
+        const ricefwConfiguration = fields["BP.ERP.RICEFW"] || null;
+        const testingStatus = fields["Custom.TestingStatus"] || null;
+        const featureType = fields["Custom.BPFeatureType"] || null;
+        const area = fields["Custom.Area"] || null;
 
         requestBody.properties.push({ field_id: constants.RequirementDescriptionFieldID, field_value: description });
         requestBody.properties.push({ field_id: constants.RequirementStreamSquadFieldID, field_value: areaPath });
@@ -426,13 +395,13 @@ exports.handler = async function ({ event, constants }, context, callback) {
         const reason = fields["System.Reason"] || null;
         const acceptanceCriteria = fields["Microsoft.VSTS.Common.AcceptanceCriteria"] || "";
         const fullDescription = fields["System.Description"] || "";
-        const applicationName = fields[constants.AzDoApplicationNameFieldRef || "Custom.ApplicationName"] || null;
-        const processRelease = fields[constants.AzDoRicefwProcessReleaseFieldRef || "Custom.ProcessRelease"] || null;
-        const ricefwId = fields[constants.AzDoRicefwIdFieldRef || "Custom.RICEFWID"] || null;
-        const ricefwConfiguration = fields[constants.AzDoRicefwConfigurationFieldRef || "BP.ERP.RICEFW"] || null;
-        const testingStatus = fields[constants.AzDoRicefwTestingStatusFieldRef || "Custom.TestingStatus"] || null;
-        const featureType = fields[constants.AzDoRicefwFeatureTypeFieldRef || "Custom.FeatureType"] || null;
-        const area = fields[constants.AzDoRicefwAreaFieldRef || "Custom.Area"] || null;
+        const applicationName = fields["Custom.ApplicationName"] || null;
+        const processRelease = fields["Custom.ProcessRelease"] || null;
+        const ricefwId = fields["Custom.RICEFWID"] || null;
+        const ricefwConfiguration = fields["BP.ERP.RICEFW"] || null;
+        const testingStatus = fields["Custom.TestingStatus"] || null;
+        const featureType = fields["Custom.BPFeatureType"] || null;
+        const area = fields["Custom.Area"] || null;
 
         requestBody.properties.push({ field_id: constants.RequirementDescriptionFieldID, field_value: description });
         requestBody.properties.push({ field_id: constants.RequirementStreamSquadFieldID, field_value: areaPath });
@@ -583,9 +552,7 @@ exports.handler = async function ({ event, constants }, context, callback) {
         "RICEFW": 11370,
     }[adoRequirementCategory] || null;
 
-    const adoRicefwConfiguration = fields["BP.ERP.RICEFW"] || null;
-
-    const rootModuleId = await ensureRicefwRootModule();
+    const rootModuleId = constants.FeatureParentID;
     const iterationPath = fields["System.IterationPath"] || null;
     const targetModuleId = await ensureModulePath(rootModuleId, adoAreaPath, iterationPath);
     const namePrefix = getNamePrefix(workItemId);
