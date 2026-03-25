@@ -90,6 +90,7 @@ exports.handler = async function ({ event, constants }, context, callback) {
         const workItemType = (fields["System.WorkItemType"] || "").toString().trim();
         const featureType = (fields["Custom.BPFeatureType"] || "").toString().trim();
         const ricefwCongiguration = (fields["Custom.BP.ERP.RICEFW"] || "").toString().trim();
+        const featureState = (fields["System.State"] || "").toString().trim();
         return workItemType.toLowerCase() === "feature" 
             && (featureType.toLowerCase() === "ricefw" 
                 || featureType.toLowerCase() === "change request") 
@@ -97,7 +98,9 @@ exports.handler = async function ({ event, constants }, context, callback) {
                 || ricefwCongiguration.toLowerCase() === "Form"
                 || ricefwCongiguration.toLowerCase() === "Interface"
                 || ricefwCongiguration.toLowerCase() === "Report"
-                || ricefwCongiguration.toLowerCase() === "Workflow");
+                || ricefwCongiguration.toLowerCase() === "Workflow")
+            && (featureState.toLowerCase() !== "rejected"
+                && featureState.toLowerCase() !== "cancelled");
     }
 
     function buildRequirementName(namePrefix, eventData) {
