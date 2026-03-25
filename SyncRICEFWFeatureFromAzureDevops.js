@@ -89,8 +89,9 @@ exports.handler = async function ({ event, constants }, context, callback) {
         const fields = getFields(eventData);
         const workItemType = (fields["System.WorkItemType"] || "").toString().trim();
         const featureType = (fields["Custom.BPFeatureType"] || "").toString().trim();
-        const ricefwCongiguration = (fields["Custom.BP.ERP.RICEFW"] || "").toString().trim();
+        const ricefwCongiguration = (fields["BP.ERP.RICEFW"] || "").toString().trim();
         const featureState = (fields["System.State"] || "").toString().trim();
+        console.log(`[Debug] Evaluating if work item is a RICEFW Feature: WorkItemType='${workItemType}', FeatureType='${featureType}', RICEFWConfiguration='${ricefwCongiguration}', State='${featureState}'`);
         return workItemType.toLowerCase() === "feature" 
             && (featureType.toLowerCase() === "ricefw" 
                 || featureType.toLowerCase() === "change request") 
@@ -340,7 +341,7 @@ exports.handler = async function ({ event, constants }, context, callback) {
         const applicationName = fields[constants.AzDoApplicationNameFieldRef || "Custom.ApplicationName"] || null;
         const processRelease = fields[constants.AzDoRicefwProcessReleaseFieldRef || "Custom.ProcessRelease"] || null;
         const ricefwId = fields[constants.AzDoRicefwIdFieldRef || "Custom.RICEFWID"] || null;
-        const ricefwConfiguration = fields[constants.AzDoRicefwConfigurationFieldRef || "Custom.BP.ERP.RICEFW"] || null;
+        const ricefwConfiguration = fields[constants.AzDoRicefwConfigurationFieldRef || "BP.ERP.RICEFW"] || null;
         const testingStatus = fields[constants.AzDoRicefwTestingStatusFieldRef || "Custom.TestingStatus"] || null;
         const featureType = fields[constants.AzDoRicefwFeatureTypeFieldRef || "Custom.FeatureType"] || null;
         const area = fields[constants.AzDoRicefwAreaFieldRef || "Custom.Area"] || null;
@@ -428,7 +429,7 @@ exports.handler = async function ({ event, constants }, context, callback) {
         const applicationName = fields[constants.AzDoApplicationNameFieldRef || "Custom.ApplicationName"] || null;
         const processRelease = fields[constants.AzDoRicefwProcessReleaseFieldRef || "Custom.ProcessRelease"] || null;
         const ricefwId = fields[constants.AzDoRicefwIdFieldRef || "Custom.RICEFWID"] || null;
-        const ricefwConfiguration = fields[constants.AzDoRicefwConfigurationFieldRef || "Custom.BP.ERP.RICEFW"] || null;
+        const ricefwConfiguration = fields[constants.AzDoRicefwConfigurationFieldRef || "BP.ERP.RICEFW"] || null;
         const testingStatus = fields[constants.AzDoRicefwTestingStatusFieldRef || "Custom.TestingStatus"] || null;
         const featureType = fields[constants.AzDoRicefwFeatureTypeFieldRef || "Custom.FeatureType"] || null;
         const area = fields[constants.AzDoRicefwAreaFieldRef || "Custom.Area"] || null;
@@ -582,7 +583,7 @@ exports.handler = async function ({ event, constants }, context, callback) {
         "RICEFW": 11370,
     }[adoRequirementCategory] || null;
 
-    const adoRicefwConfiguration = fields["Custom.BP.ERP.RICEFW"] || null;
+    const adoRicefwConfiguration = fields["BP.ERP.RICEFW"] || null;
 
     const rootModuleId = await ensureRicefwRootModule();
     const iterationPath = fields["System.IterationPath"] || null;
