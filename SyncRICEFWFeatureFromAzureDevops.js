@@ -368,7 +368,7 @@ exports.handler = async function ({ event, constants }, context, callback) {
         }
         if (constants.RequirementApplicationNameFieldID && applicationName) {
             requestBody.properties.push({ field_id: constants.RequirementApplicationNameFieldID, field_value: applicationName });
-        }
+        })
 
         // RICEFW-specific fields (optional constants)
         if (constants.RequirementStateFieldID && state) {
@@ -389,8 +389,8 @@ exports.handler = async function ({ event, constants }, context, callback) {
         if (constants.RequirementRicefwIdFieldID && ricefwId) {
             requestBody.properties.push({ field_id: constants.RequirementRicefwIdFieldID, field_value: ricefwId });
         }
-        if (constants.RequirementRicefwConfigurationFieldID && ricefwConfiguration) {
-            requestBody.properties.push({ field_id: constants.RequirementRicefwConfigurationFieldID, field_value: ricefwConfiguration });
+        if (constants.RequirementRICEFWConfigurationFieldID && ricefwConfiguration) {
+            requestBody.properties.push({ field_id: constants.RequirementRICEFWConfigurationFieldID, field_value: ricefwConfiguration });
         }
         if (constants.RequirementTestingStatusFieldID && testingStatus) {
             requestBody.properties.push({ field_id: constants.RequirementTestingStatusFieldID, field_value: testingStatus });
@@ -477,8 +477,8 @@ exports.handler = async function ({ event, constants }, context, callback) {
         if (constants.RequirementRicefwIdFieldID && ricefwId) {
             requestBody.properties.push({ field_id: constants.RequirementRicefwIdFieldID, field_value: ricefwId });
         }
-        if (constants.RequirementRicefwConfigurationFieldID && ricefwConfiguration) {
-            requestBody.properties.push({ field_id: constants.RequirementRicefwConfigurationFieldID, field_value: ricefwConfiguration });
+        if (constants.RequirementRICEFWConfigurationFieldID && ricefwConfiguration) {
+            requestBody.properties.push({ field_id: constants.RequirementRICEFWConfigurationFieldID, field_value: ricefwConfiguration });
         }
         if (constants.RequirementTestingStatusFieldID && testingStatus) {
             requestBody.properties.push({ field_id: constants.RequirementTestingStatusFieldID, field_value: testingStatus });
