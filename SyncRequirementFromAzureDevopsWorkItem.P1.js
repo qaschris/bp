@@ -2,6 +2,11 @@ const axios = require("axios");
 
 exports.handler = async function ({ event, constants }, context, callback) {
     // --- Helper functions ---
+    function emitEvent(name, payload) {
+        let t = triggers.find(t => t.name === name);
+        return t && new Webhooks().invoke(t, payload);
+    }
+
     function getFitGap(eventData) {
         if (eventData.eventType === "workitem.updated") {
             const delta = eventData.resource?.fields?.["BP.ERP.FitGap"];
@@ -142,20 +147,25 @@ exports.handler = async function ({ event, constants }, context, callback) {
 
             return response.data;
         } catch (error) {
-            console.log(`[Error] HTTP request failed.`);
-            console.log(`[Error] URL: ${url}`);
-            console.log(`[Error] Method: ${method}`);
-            console.log(`[Error] Message: ${error.message}`);
+            console.error(`[Error] HTTP request failed.`);
+            console.error(`[Error] URL: ${url}`);
+            console.error(`[Error] Method: ${method}`);
+            console.error(`[Error] Message: ${error.message}`);
+            console.error(`[Error] URL: ${url}`);
+            emitEvent('ChatOpsEvent', { message: `[Error] HTTP request failed for ${method} ${url}: ${error.message}` });
 
             if (error.response) {
-                console.log(`[Error] HTTP Status: ${error.response.status}`);
-                console.log(`[Error] Error Response Headers: ${safeJson(error.response.headers)}`);
-                console.log(`[Error] Error Response Body: ${safeJson(error.response.data)}`);
+                console.error(`[Error] HTTP Status: ${error.response.status}`);
+                console.error(`[Error] Error Response Headers: ${safeJson(error.response.headers)}`);
+                console.error(`[Error] Error Response Body: ${safeJson(error.response.data)}`);
+                emitEvent('ChatOpsEvent', { message: `[Error] HTTP request failed for ${method} ${url}: ${error.message}` });
             } else if (error.request) {
-                console.log(`[Error] No HTTP response received.`);
-                console.log(`[Error] Raw Request Object: ${safeJson(error.request)}`);
+                console.error(`[Error] No HTTP response received.`);
+                console.error(`[Error] Raw Request Object: ${safeJson(error.request)}`);
+                emitEvent('ChatOpsEvent', { message: `[Error] HTTP request failed for ${method} ${url}: No response received` });
             } else {
-                console.log(`[Error] Axios config/setup error: ${safeJson(error)}`);
+                console.error(`[Error] Axios config/setup error: ${safeJson(error)}`);
+                emitEvent('ChatOpsEvent', { message: `[Error] HTTP request failed for ${method} ${url}: Axios config/setup error` });
             }
 
             throw new Error(`Failed to ${method} ${url}. ${error.message}`);
@@ -237,7 +247,8 @@ exports.handler = async function ({ event, constants }, context, callback) {
             moduleChildrenCache[cacheKey] = items;
             return items;
         } catch (error) {
-            console.log(`[Error] Failed to get sub-modules for parent '${parentId}'.`, error);
+            console.error(`[Error] Failed to get sub-modules for parent '${parentId}'.`, error);
+            emitEvent('ChatOpsEvent', { message: `[Error] Failed to get sub-modules for parent '${parentId}'.` });
             throw error;
         }
     }
@@ -255,7 +266,8 @@ exports.handler = async function ({ event, constants }, context, callback) {
             console.log(`[Info] Created qTest module '${name}' under parent '${parentId}'.`);
             return created;
         } catch (error) {
-            console.log(`[Error] Failed to create module '${name}' under parent '${parentId}'.`, error);
+            console.error(`[Error] Failed to create module '${name}' under parent '${parentId}'.`, error);
+            emitEvent('ChatOpsEvent', { message: `[Error] Failed to create module '${name}' under parent '${parentId}'.` });
             throw error;
         }
     }
@@ -339,7 +351,8 @@ exports.handler = async function ({ event, constants }, context, callback) {
                 console.log("[Warn] Multiple Requirements found by work item id.");
             }
         } catch (error) {
-            console.log("[Error] Failed to get requirement by work item id.", error);
+            console.error("[Error] Failed to get requirement by work item id.", error);
+            emitEvent('ChatOpsEvent', { message: "[Error] Failed to get requirement by work item id." });
             failed = true;
         }
 
@@ -427,7 +440,8 @@ exports.handler = async function ({ event, constants }, context, callback) {
             await put(url, requestBody);
             console.log(`[Info] Requirement '${requirementId}' updated.`);
         } catch (error) {
-            console.log(`[Error] Failed to update requirement '${requirementId}'.`, error);
+            console.error(`[Error] Failed to update requirement '${requirementId}'.`, error);
+            emitEvent('ChatOpsEvent', { message: `[Error] Failed to update requirement '${requirementId}'.` });
         }
     }
 
@@ -511,7 +525,8 @@ exports.handler = async function ({ event, constants }, context, callback) {
             await post(url, requestBody);
             console.log(`[Info] Requirement created.`);
         } catch (error) {
-            console.log(`[Error] Failed to create requirement`, error);
+            console.error(`[Error] Failed to create requirement`, error);
+            emitEvent('ChatOpsEvent', { message: `[Error] Failed to create requirement` });
         }
     }
 
@@ -522,7 +537,8 @@ exports.handler = async function ({ event, constants }, context, callback) {
             await doRequest(url, "DELETE", null);
             console.log(`[Info] Requirement '${requirementId}' deleted.`);
         } catch (error) {
-            console.log(`[Error] Failed to delete requirement '${requirementId}'.`, error);
+            console.error(`[Error] Failed to delete requirement '${requirementId}'.`, error);
+            emitEvent('ChatOpsEvent', { message: `[Error] Failed to delete requirement '${requirementId}'.` });
         }
     }
 
@@ -566,7 +582,8 @@ exports.handler = async function ({ event, constants }, context, callback) {
             return;
 
         default:
-            console.log(`[Error] Unknown workitem event type '${event.eventType}' for 'WI${workItemId}'`);
+            console.error(`[Error] Unknown workitem event type '${event.eventType}' for 'WI${workItemId}'`);
+            emitEvent('ChatOpsEvent', { message: `[Error] Unknown workitem event type '${event.eventType}' for 'WI${workItemId}'` });
             return;
     }
 

@@ -3,6 +3,11 @@ const axios = require('axios');
 
 exports.handler = async function ({ event, constants, triggers }, context, callback) {
   try {
+    function emitEvent(name, payload) {
+        let t = triggers.find(t => t.name === name);
+        return t && new Webhooks().invoke(t, payload);
+    }
+
     console.log("[Info] Defect update event received.");
 
     const iteration = event.iteration !== undefined ? event.iteration : 1;
@@ -13,6 +18,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
     if (!defectId || !projectId) {
       console.error("[Error] Missing defect or project ID in event.");
+      emitEvent('ChatOpsEvent', { message: '[Error] Missing defect or project ID in event.' });
       return;
     }
     if (projectId != constants.ProjectID) {
@@ -33,6 +39,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
     } catch (err) {
       console.error("[Error] Failed to fetch defect:", err.message);
+      emitEvent('ChatOpsEvent', { message: '[Error] Failed to fetch defect.' });
       return;
     }
 
@@ -66,6 +73,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     }
     if (!wiMatch) {
       console.error("[Error] Could not extract Azure Work Item ID.");
+      emitEvent('ChatOpsEvent', { message: '[Error] Could not extract Azure Work Item ID.' });
       return;
     }
     const workItemId = wiMatch[1];
@@ -101,6 +109,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         userName = identity;
       } catch (e) {
         console.error("[Error] Failed to fetch qTest user details:", e.response?.data || e.message);
+        emitEvent('ChatOpsEvent', { message: '[Error] Failed to fetch qTest user details.' });
       }
     }
 
@@ -113,6 +122,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
       adoCurrent = await getAdoWorkItem(workItemId, constants.AZDO_TOKEN, constants.AzDoProjectURL);
     } catch (e) {
       console.error("[Error] Failed to read ADO work item:", e.response ?.data || e.message);
+      emitEvent('ChatOpsEvent', { message: '[Error] Failed to read ADO work item.' });
       return;
     }
     const cur = adoCurrent ?.fields || {};
@@ -185,10 +195,12 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
       console.log("[Info] Successfully updated Azure DevOps work item.");
     } catch (err) {
       console.error("[Error] Azure update failed:", err.response ?.data || err.message);
+      emitEvent('ChatOpsEvent', { message: '[Error] Azure update failed.' });
     }
 
   } catch (fatal) {
     console.error("[Fatal] Unexpected error:", fatal.message);
+    emitEvent('ChatOpsEvent', { message: '[Fatal] Unexpected error occurred.' });
   }
 
   

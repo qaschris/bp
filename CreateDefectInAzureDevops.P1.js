@@ -100,9 +100,10 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             attempt++;
         } while (attempt < 12);
 
-        console.log(
+        console.error(
             `[Error] Could not get defect details. User may not have completed the initial save in qTest or the defect was abandoned.`
-        );
+        )
+        emitEvent('ChatOpsEvent', { message: '[Error] Could not get defect details. User may not have completed the initial save in qTest or the defect was abandoned.' });
 
         if (iteration < maxIterations) {
             iteration = iteration + 1;
@@ -115,6 +116,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             console.error(
                 `[Error] Retry exceeded ${maxIterations} iterations. Rule execution timed out.`
             );
+            emitEvent('ChatOpsEvent', { message: '[Error] Retry exceeded ${maxIterations} iterations. Rule execution timed out.' });
         }
     }
 
@@ -137,12 +139,14 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         const targetDate = targetDateField ? targetDateField.field_value : null;
         console.log(`[Info] Defect Target Date: ${targetDate}`);
         if (!summaryField || !descriptionField || !severityField) {
-            console.log("[Error] Fields not found, exiting.");
+            console.error("[Error] Fields not found, exiting.");
+            emitEvent('ChatOpsEvent', { message: '[Error] Fields not found, exiting.' });
             return; // Prevents using undefined values
         }
 
         if (!summaryField || !descriptionField || !severityField) {
-            console.log("[Error] Fields not found, exiting.");
+            console.error("[Error] Fields not found, exiting.");
+            emitEvent('ChatOpsEvent', { message: '[Error] Fields not found, exiting.' });
             return; // Prevents using undefined values
         }
 
@@ -199,10 +203,12 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             return response.data;
         } catch (error) {
             if (error.response && error.response.status === 404) {
-                console.log(`[Info] qTest returned 404 — defect '${defectId}' not found (abandoned).`);
+                console.error(`[Error] qTest returned 404 — defect '${defectId}' not found (abandoned).`);
+                emitEvent('ChatOpsEvent', { message: `[Error] qTest returned 404 — defect '${defectId}' not found (abandoned).` });
                 return null; // Important: return null, not undefined
             }
-            console.log("[Error] Failed to get defect by id.", error);
+            console.error("[Error] Failed to get defect by id.", error);
+            emitEvent('ChatOpsEvent', { message: '[Error] Failed to get defect by id.' });
             return null;
         }
     }
@@ -318,7 +324,8 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             return displayName;
 
         } catch (error) {
-            console.log(`[Warn] Could not resolve qTest user ID '${userId}' to name. Using ID instead.`);
+            console.error(`[Error] Could not resolve qTest user ID '${userId}' to name. Using ID instead.`);
+            emitEvent('ChatOpsEvent', { message: `[Error] Could not resolve qTest user ID '${userId}' to name. Using ID instead.` });
             return userId.toString();
         }
     }
@@ -490,14 +497,16 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
                 console.log(`[Error] Failed to create bug in Azure DevOps. Status: ${error.response.status}`);
                 console.log(`[Error] Status: ${error.response.status}`);
                 console.log(`[Error] Data: ${JSON.stringify(error.response && error.response.data ? error.response.data : null, null, 2)}`);
-
+                emitEvent('ChatOpsEvent', { message: `[Error] Failed to create bug in Azure DevOps. Status: ${error.response.status}` });
             } else if (error.request) {
                 console.log(`[Error] No response received from ADO. Possible network or permission issue.`);
                 console.log(`[Error] Request: ${JSON.stringify(error.request, null, 2)}`);
+                emitEvent('ChatOpsEvent', { message: '[Error] No response received from ADO. Possible network or permission issue.' });
             } else {
                 console.log(`[Error] Raw: ${JSON.stringify(error, null, 2)}`);
                 console.log(`[Error] Raw: ${error.message}`);
                 console.log(`[Error] Response: ${JSON.stringify(error.response && error.response.data ? error.response.data : null, null, 2)}`);
+                emitEvent('ChatOpsEvent', { message: `[Error] Failed to create bug in Azure DevOps. Status: ${error.response.status}` });
                 console.log(`[Debug] ADO Request Payload: ${JSON.stringify(requestBody, null, 2)}`);
             }
             console.log(`[Debug] Full error object: ${JSON.stringify(error, Object.getOwnPropertyNames(error), 2)}`);
@@ -528,6 +537,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             console.log(`[Info] Defect '${defectId}' updated.`);
         } catch (error) {
             console.log(`[Error] Failed to update defect '${defectId}'.`, error);
+            emitEvent('ChatOpsEvent', { message: `[Error] Failed to update defect '${defectId}'.` });
         }
     }
 

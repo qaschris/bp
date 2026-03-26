@@ -24,6 +24,10 @@
     // Acceptance criteria:
     // ${htmlToPlainText(fields["Microsoft.VSTS.Common.AcceptanceCriteria"])}`;
     //     }
+        function emitEvent(name, payload) {
+            let t = triggers.find(t => t.name === name);
+            return t && new Webhooks().invoke(t, payload);
+        }
 
         function buildDefectSummary(namePrefix, eventData) {
             const fields = getFields(eventData);
@@ -80,7 +84,8 @@
     
                 return response.data ?.comments || [];
             } catch (error) {
-                console.log(`[Warn] Failed to fetch ADO comments: ${error.message}`);
+                console.error(`[Error] Failed to fetch ADO comments: ${error.message}`);
+                emitEvent('ChatOpsEvent', { message: '[Error] Failed to fetch ADO comments.' });
                 return [];
             }
         }
@@ -124,10 +129,11 @@
                 const user = arr[0];
                 return user?.id ?? null;
             } catch (e) {
-                console.log(
-                    `[Warn] qTest user search failed for '${identity}'. ` +
+                console.error(
+                    `[Error] qTest user search failed for '${identity}'. ` +
                     `Status: ${e?.response?.status ?? "n/a"}`
                 );
+                emitEvent('ChatOpsEvent', { message: `[Error] qTest user search failed for '${identity}'.` });
                 return null;
             }
         }
@@ -176,6 +182,7 @@
             }
             default:
                 console.log(`[Error] Unknown workitem event type '${event.eventType}' for 'WI${workitemId}'`);
+                emitEvent('ChatOpsEvent', { message: `[Error] Unknown workitem event type '${event.eventType}' for 'WI${workitemId}'` });
                 return;
         }
 
@@ -441,7 +448,8 @@
                     }
                 }
             } catch (error) {
-                console.log("[Error] Failed to get defect by work item id.", error);
+                console.error("[Error] Failed to get defect by work item id.", error);
+                emitEvent('ChatOpsEvent', { message: '[Error] Failed to get defect by work item id.' });
                 failed = true;
             }
 
@@ -612,10 +620,12 @@
                 console.log(`[Info] Defect '${defectId}' (${defectPid}) updated.`);
             } catch (error) {
                 if (error.response) {
-                    console.log(`[Error] Failed to update defect '${defectId}'.`, error);
+                    console.error(`[Error] Failed to update defect '${defectId}'.`, error);
+                    emitEvent('ChatOpsEvent', { message: `[Error] Failed to update defect '${defectId}'.` });
                     //console.log(`[Debug] qTest API Response: ${JSON.stringify(response, null, 2)}`);
                 } else {
-                    console.log(`[Error] Failed to update defect '${defectId}' — ${error.message}`);
+                    console.error(`[Error] Failed to update defect '${defectId}' — ${error.message}`);
+                    emitEvent('ChatOpsEvent', { message: `[Error] Failed to update defect '${defectId}'.` });
                     //console.log(`[Error] Response Data: ${JSON.stringify(error.response.data, null, 2)}`);
                     //console.log(`[Error] HTTP ${error.response.status}: ${JSON.stringify(error.response.data, null, 2)}`);
                 }
@@ -651,9 +661,10 @@ async function doqTestRequest(url, method, requestBody) {
                 const message = error?.response?.data
                     ? JSON.stringify(error.response.data, null, 2)
                     : error.message;
-                console.log(`[Error] URL: ${url}`);
-                console.log(`[Error] HTTP Status: ${status}`);
-                console.log(`[Error] Message: ${message}`);
+                console.error(`[Error] URL: ${url}`);
+                console.error(`[Error] HTTP Status: ${status}`);
+                console.error(`[Error] Message: ${message}`);
+                emitEvent('ChatOpsEvent', { message: `[Error] qTest API ${method} ${url} failed with ${status || "Unknown"}: ${message}` });
                 throw new Error(`qTest API ${method} ${url} failed with ${status || "Unknown"}: ${message}`);
                 //throw error;
             }

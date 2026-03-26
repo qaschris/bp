@@ -2,6 +2,11 @@ const axios = require("axios");
 
 exports.handler = async function ({ event, constants }, context, callback) {
     // --- Helper functions ---
+    function emitEvent(name, payload) {
+        let t = triggers.find(t => t.name === name);
+        return t && new Webhooks().invoke(t, payload);
+    }
+
     function getFields(eventData) {
         return eventData.resource.revision ? eventData.resource.revision.fields : eventData.resource.fields;
     }
@@ -115,27 +120,21 @@ exports.handler = async function ({ event, constants }, context, callback) {
         const acceptanceCriteria = fields["Microsoft.VSTS.Common.AcceptanceCriteria"] || "";
         const description = fields["System.Description"] || "";
 
-        const featureType = fields[constants.AzDoRicefwFeatureTypeFieldRef || "Custom.BPFeatureType"] || "";
-        const processRelease = fields[constants.AzDoRicefwProcessReleaseFieldRef || "Custom.ProcessRelease"] || "";
-        const ricefwId = fields[constants.AzDoRicefwIdFieldRef || "Custom.RICEFWID"] || "";
-        const ricefwConfiguration = fields[constants.AzDoRicefwConfigurationFieldRef || "Custom.RICEFWConfiguration"] || "";
-        const testingStatus = fields[constants.AzDoRicefwTestingStatusFieldRef || "Custom.TestingStatus"] || "";
-        const area = fields[constants.AzDoRicefwAreaFieldRef || "Custom.Area"] || "";
+        const featureType = fields["Custom.BPFeatureType"] || "";
+        const processRelease = fields["Custom.ProcessRelease"] || "";
+        const ricefwId = fields["Custom.RICEFWID"] || "";
+        const ricefwConfiguration = fields["Custom.RICEFWConfiguration"] || "";
+        const testingStatus = fields["Custom.TestingStatus"] || "";
+        const area = fields["Custom.Area"] || "";
 
         return `<a href="${eventData.resource._links.html.href}" target="_blank">Open in Azure DevOps</a><br>
                 <b>Type:</b> ${workItemType}<br>
-                <b>Feature Type:</b> ${featureType}<br>
-                <b>RICEFW ID:</b> ${ricefwId}<br>
-                <b>Area:</b> ${area}<br>
                 <b>Area Path:</b> ${areaPath}<br>
                 <b>Iteration:</b> ${iterationPath}<br>
                 <b>State:</b> ${state}<br>
                 <b>Reason:</b> ${reason}<br>
-                <b>Testing Status:</b> ${testingStatus}<br>
-                <b>Complexity:</b> ${complexity}<br>
+                <b>RICEFW ID:</b> ${ricefwId}<br>
                 <b>Process Release:</b> ${processRelease}<br>
-                <b>RICEFW / Configuration:</b> ${ricefwConfiguration}<br>
-                <b>Assigned To:</b> ${normalizeAssignedTo(fields["System.AssignedTo"])}<br>
                 <b>Acceptance Criteria:</b> ${acceptanceCriteria}<br>
                 <b>Description:</b> ${description}`;
     }
@@ -157,6 +156,8 @@ exports.handler = async function ({ event, constants }, context, callback) {
             const response = await axios(opts);
             return response.data;
         } catch (error) {
+            console.error(`[Error] HTTP request failed for ${method} ${url}:`, error);
+            emitEvent('ChatOpsEvent', { message: `[Error] HTTP request failed for ${method} ${url}. ${error.message}` });
             throw new Error(`Failed to ${method} ${url}. ${error.message}`);
         }
     }
@@ -202,7 +203,8 @@ exports.handler = async function ({ event, constants }, context, callback) {
             moduleChildrenCache[cacheKey] = items;
             return items;
         } catch (error) {
-            console.log(`[Error] Failed to get sub-modules for parent '${parentId}'.`, error);
+            console.error(`[Error] Failed to get sub-modules for parent '${parentId}'.`, error);
+            emitEvent('ChatOpsEvent', { message: `[Error] Failed to get sub-modules for parent '${parentId}'.` });
             throw error;
         }
     }
@@ -253,6 +255,8 @@ exports.handler = async function ({ event, constants }, context, callback) {
                 const created = await createModule(segment, currentParentId);
                 currentParentId = created?.id;
                 if (!currentParentId) {
+                    console.error(`[Error] Module creation for '${segment}' did not return an id.`);
+                    emitEvent('ChatOpsEvent', { message: `[Error] Module creation for '${segment}' did not return an id.` });
                     throw new Error(`Module creation for '${segment}' did not return an id.`);
                 }
             }
@@ -285,7 +289,8 @@ exports.handler = async function ({ event, constants }, context, callback) {
                 console.log("[Warn] Multiple Requirements found by work item id.");
             }
         } catch (error) {
-            console.log("[Error] Failed to get requirement by work item id.", error);
+            console.error("[Error] Failed to get requirement by work item id.", error);
+            emitEvent('ChatOpsEvent', { message: `[Error] Failed to get requirement by work item id.` });
             failed = true;
         }
 
@@ -376,7 +381,8 @@ exports.handler = async function ({ event, constants }, context, callback) {
             await put(url, requestBody);
             console.log(`[Info] RICEFW requirement '${requirementId}' updated.`);
         } catch (error) {
-            console.log(`[Error] Failed to update RICEFW requirement '${requirementId}'.`, error);
+            console.error(`[Error] Failed to update RICEFW requirement '${requirementId}'.`, error);
+            emitEvent('ChatOpsEvent', { message: `[Error] Failed to update RICEFW requirement '${requirementId}'.` });
         }
     }
 
@@ -464,7 +470,8 @@ exports.handler = async function ({ event, constants }, context, callback) {
             await post(url, requestBody);
             console.log(`[Info] RICEFW requirement created.`);
         } catch (error) {
-            console.log(`[Error] Failed to create RICEFW requirement.`, error);
+            console.error(`[Error] Failed to create RICEFW requirement.`, error);
+            emitEvent('ChatOpsEvent', { message: `[Error] Failed to create RICEFW requirement.` });
         }
     }
 
@@ -475,7 +482,8 @@ exports.handler = async function ({ event, constants }, context, callback) {
             await doRequest(url, "DELETE", null);
             console.log(`[Info] Requirement '${requirementId}' deleted.`);
         } catch (error) {
-            console.log(`[Error] Failed to delete requirement '${requirementId}'.`, error);
+            console.error(`[Error] Failed to delete requirement '${requirementId}'.`, error);
+            emitEvent('ChatOpsEvent', { message: `[Error] Failed to delete requirement '${requirementId}'.` });
         }
     }
 
@@ -521,7 +529,8 @@ exports.handler = async function ({ event, constants }, context, callback) {
             return;
 
         default:
-            console.log(`[Error] Unknown workitem event type '${event.eventType}' for 'WI${workItemId}'`);
+            console.error(`[Error] Unknown workitem event type '${event.eventType}' for 'WI${workItemId}'`);
+            emitEvent('ChatOpsEvent', { message: `[Error] Unknown workitem event type '${event.eventType}' for 'WI${workItemId}'` });
             return;
     }
 
