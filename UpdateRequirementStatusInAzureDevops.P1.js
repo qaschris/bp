@@ -2,116 +2,234 @@ const { Webhooks } = require('@qasymphony/pulse-sdk');
 const axios = require('axios');
 
 exports.handler = async function ({ event, constants, triggers }, context, callback) {
-  console.log(`[Info] Incoming event: ${JSON.stringify(event, null, 2)}`);
-
-  const requirementId = event.requirement && event.requirement.id;
-  const projectId = event.requirement && event.requirement.project_id;
-
-  if (!requirementId || !projectId) {
-    console.error(`[Error] Missing requirement ID or project ID.`);
-    return;
+  function emitEvent(name, payload) {
+    return (t = triggers.find(t => t.name === name))
+      ? new Webhooks().invoke(t, payload)
+      : console.error(`[ERROR]: (emitEvent) Webhook named '${name}' not found.`);
   }
 
-  console.log(`[Info] Requirement update event received for ID '${requirementId}'`);
+  function emitFriendlyFailure(details = {}) {
+    const platform = details.platform || "Unknown";
+    const objectType = details.objectType || "Object";
+    const objectId = details.objectId != null ? details.objectId : "Unknown";
+    const fieldName = details.fieldName ? ` Field: ${details.fieldName}.` : "";
+    const fieldValue = details.fieldValue != null && details.fieldValue !== ""
+      ? ` Value: ${details.fieldValue}.`
+      : "";
+    const detail = details.detail || "Sync failed.";
 
-  const statusFieldId = constants.RequirementStatusFieldID; // 1386
-  const adoToken = constants.AZDO_TOKEN;
-  const managerUrl = constants.ManagerURL;
-  const adoProjectUrl = constants.AzDoProjectURL;
+    const message =
+      `Sync failed. Platform: ${platform}. Object Type: ${objectType}. Object ID: ${objectId}.${fieldName}${fieldValue} Detail: ${detail}`;
 
-  // qTest Status ID ➜ ADO Test Status mapping
-  const statusMap = {
-    11163: "SIT 1 In Progress",   // SIT 1 In Progress
-    11164: "SIT 1 Complete",     // SIT 1 Complete
-    11165: "UAT In Progress",     // UAT In Progress
-    11166: "UAT Complete",       // UAT Complete
-    11219: "SIT Dry Run In Progress", //SIT Dry Run In Progress
-    11220: "SIT Dry Run Complete", //SIT Dry Run Complete
-    11236: "SIT 2 In Progress",    // SIT 2 In Progress
-    11235: "SIT 2 Complete"        // SIT 2 Complete
-  };
-
-  // Fetch qTest requirement details
-  const reqUrl = `https://${managerUrl}/api/v3/projects/${projectId}/requirements/${requirementId}`;
-  let requirement;
-  try {
-    const response = await axios.get(reqUrl, {
-      headers: { Authorization: `bearer ${constants.QTEST_TOKEN}` }
-    });
-    requirement = response.data;
-  } catch (error) {
-    console.error(`[Error] Failed to fetch requirement ${requirementId}: ${error}`);
-    return;
+    console.error(`[Error] ${message}`);
+    emitEvent('ChatOpsEvent', { message });
   }
 
-  // Extract qTest status
-  const statusProp = requirement.properties.find((p) => p.field_id == statusFieldId);
-  if (!statusProp) {
-    console.error(`[Error] Could not find status field (ID ${statusFieldId}) on requirement.`);
-    return;
-  }
-
-  const qtestStatusId = statusProp.field_value;
-  const qtestStatusLabel = statusProp.field_label || getLabelById(qtestStatusId);
-  console.log(`[Info] qTest Status ID: ${qtestStatusId}, Label: '${qtestStatusLabel || "Unknown"}'`);
-
-  const adoStatus = statusMap[qtestStatusId];
-  if (!adoStatus) {
-    console.log(`[Info] No ADO mapping found for qTest status ID '${qtestStatusId}', skipping update.`);
-    return;
-  }
-
-  // Extract Work Item ID from qTest Requirement Name (format: WI<ID>: ...)
-  const workItemName = requirement.name;
-  const match = workItemName.match(/^WI(\d+):/);
-  if (!match) {
-    console.error(`[Error] Work item ID not found in requirement name '${workItemName}'.`);
-    return;
-  }
-
-  const workItemId = match[1];
-  console.log(`[Info] Mapped ADO Work Item ID: '${workItemId}'`);
-
-  // Patch ADO Testing Status field
-  try {
-    const adoUrl = `${adoProjectUrl}/_apis/wit/workitems/${workItemId}?api-version=6.0`;
-    const requestBody = [
-      {
-        op: "add",
-        path: "/fields/Custom.TestingStatus", // <== your ADO field for testing status
-        value: adoStatus
-      }
-    ];
-
-    await axios.patch(adoUrl, requestBody, {
-      headers: {
-        "Content-Type": "application/json-patch+json",
-        Authorization: `basic ${Buffer.from(`:${adoToken}`).toString("base64")}`
-      }
-    });
-
-    console.log(`[Info] Successfully updated ADO Work Item '${workItemId}' to Testing Status '${adoStatus}' (from qTest: '${qtestStatusLabel}')`);
-  } catch (error) {
-    console.error(`[Error] Failed to update ADO Work Item '${workItemId}': ${error}`);
-    if (error.response) {
-      console.error(`[Error] Status: ${error.response.status}`);
-      console.error(`[Error] Data: ${JSON.stringify(error.response.data, null, 2)}`);
-    }
-  }
-
-  // Helper: manually resolve label for known IDs
   function getLabelById(id) {
     const map = {
       11163: "SIT 1 In Progress",
       11164: "SIT 1 Complete",
       11165: "UAT In Progress",
       11166: "UAT Complete",
-      11219: "SIT Dry Run In Progress", //SIT Dry Run In Progress
-      11220: "SIT Dry Run Complete", //SIT Dry Run Complete
+      11219: "SIT Dry Run In Progress",
+      11220: "SIT Dry Run Complete",
       11236: "SIT 2 In Progress",
       11235: "SIT 2 Complete"
     };
     return map[id];
   }
+
+  async function getAdoWorkItem(workItemId, token, baseUrl) {
+    const url = `${baseUrl}/_apis/wit/workitems/${workItemId}?api-version=6.0`;
+    const encodedToken = Buffer.from(`:${token}`).toString("base64");
+    const resp = await axios.get(url, {
+      headers: { Authorization: `Basic ${encodedToken}` }
+    });
+    return resp.data;
+  }
+
+  try {
+    console.log(`[Info] Incoming event: ${JSON.stringify(event, null, 2)}`);
+
+    const requirementId = event.requirement && event.requirement.id;
+    const projectId = event.requirement && event.requirement.project_id;
+
+    if (!requirementId || !projectId) {
+      console.error(`[Error] Missing requirement ID or project ID.`);
+      emitFriendlyFailure({
+        platform: "qTest",
+        objectType: "Requirement",
+        objectId: requirementId || "Unknown",
+        detail: "Event did not include the required requirement or project identifier."
+      });
+      return;
+    }
+
+    if (projectId != constants.ProjectID) {
+      console.log(`[Info] Project not matching '${projectId}' != '${constants.ProjectID}', exiting.`);
+      return;
+    }
+
+    console.log(`[Info] Requirement update event received for ID '${requirementId}'`);
+
+    const statusFieldId = constants.RequirementStatusFieldID;
+    const adoToken = constants.AZDO_TOKEN;
+    const managerUrl = constants.ManagerURL;
+    const adoProjectUrl = constants.AzDoProjectURL;
+    const adoTestingStatusFieldRef = constants.AzDoTestingStatusFieldRef || "Custom.TestingStatus";
+
+    const statusMap = {
+      11163: "SIT 1 In Progress",
+      11164: "SIT 1 Complete",
+      11165: "UAT In Progress",
+      11166: "UAT Complete",
+      11219: "SIT Dry Run In Progress",
+      11220: "SIT Dry Run Complete",
+      11236: "SIT 2 In Progress",
+      11235: "SIT 2 Complete"
+    };
+
+    const reqUrl = `https://${managerUrl}/api/v3/projects/${projectId}/requirements/${requirementId}`;
+    let requirement;
+
+    try {
+      const response = await axios.get(reqUrl, {
+        headers: { Authorization: `bearer ${constants.QTEST_TOKEN}` }
+      });
+      requirement = response.data;
+    } catch (error) {
+      console.error(`[Error] Failed to fetch requirement ${requirementId}:`, error.response?.data || error.message);
+      emitFriendlyFailure({
+        platform: "qTest",
+        objectType: "Requirement",
+        objectId: requirementId,
+        detail: "Unable to read requirement details from qTest."
+      });
+      return;
+    }
+
+    if (constants.SyncUserRegex) {
+      const updaterName =
+        requirement?.updated_by?.name ||
+        requirement?.last_modified_by?.name ||
+        requirement?.modified_by?.name ||
+        "";
+
+      if (new RegExp(constants.SyncUserRegex, "i").test(updaterName)) {
+        console.log(`[Info] Update appears from sync user '${updaterName}'; skipping to avoid loop.`);
+        return;
+      }
+    }
+
+    const props = Array.isArray(requirement.properties) ? requirement.properties : [];
+    const statusProp = props.find((p) => p.field_id == statusFieldId);
+
+    if (!statusProp) {
+      console.error(`[Error] Could not find status field (ID ${statusFieldId}) on requirement.`);
+      emitFriendlyFailure({
+        platform: "qTest",
+        objectType: "Requirement",
+        objectId: requirementId,
+        fieldName: "Status",
+        detail: "Required status field was not found on the qTest requirement."
+      });
+      return;
+    }
+
+    const qtestStatusId = statusProp.field_value;
+    const qtestStatusLabel = statusProp.field_value_name || statusProp.field_label || getLabelById(qtestStatusId);
+
+    console.log(`[Info] qTest Status ID: ${qtestStatusId}, Label: '${qtestStatusLabel || "Unknown"}'`);
+
+    const adoStatus = statusMap[qtestStatusId];
+    if (!adoStatus) {
+      console.log(`[Info] No ADO mapping found for qTest status ID '${qtestStatusId}', skipping update.`);
+      return;
+    }
+
+    const workItemName = requirement.name || "";
+    const match = workItemName.match(/^WI(\d+):/);
+
+    if (!match) {
+      console.error(`[Error] Work item ID not found in requirement name '${workItemName}'.`);
+      emitFriendlyFailure({
+        platform: "ADO",
+        objectType: "Requirement",
+        objectId: requirementId,
+        fieldName: "Work Item ID",
+        detail: "Unable to determine the linked Azure DevOps work item from the qTest requirement name."
+      });
+      return;
+    }
+
+    const workItemId = match[1];
+    console.log(`[Info] Mapped ADO Work Item ID: '${workItemId}'`);
+
+    let adoCurrent;
+    try {
+      adoCurrent = await getAdoWorkItem(workItemId, adoToken, adoProjectUrl);
+    } catch (error) {
+      console.error(`[Error] Failed to read ADO Work Item '${workItemId}':`, error.response?.data || error.message);
+      emitFriendlyFailure({
+        platform: "ADO",
+        objectType: "Requirement",
+        objectId: workItemId,
+        detail: "Unable to read the Azure DevOps work item."
+      });
+      return;
+    }
+
+    const curAdoStatus = adoCurrent?.fields?.[adoTestingStatusFieldRef] || "";
+    console.log(`[Info] Current ADO Testing Status: '${curAdoStatus || "(empty)"}'`);
+    console.log(`[Info] Desired ADO Testing Status: '${adoStatus}'`);
+
+    if (String(curAdoStatus).trim() === String(adoStatus).trim()) {
+      console.log(`[Info] ADO Testing Status already matches qTest status. Skipping patch to avoid loop.`);
+      return;
+    }
+
+    try {
+      const adoUrl = `${adoProjectUrl}/_apis/wit/workitems/${workItemId}?api-version=6.0`;
+      const requestBody = [
+        {
+          op: "add",
+          path: `/fields/${adoTestingStatusFieldRef}`,
+          value: adoStatus
+        }
+      ];
+
+      console.log(`[Info] Sending ADO Testing Status patch: ${JSON.stringify(requestBody, null, 2)}`);
+
+      await axios.patch(adoUrl, requestBody, {
+        headers: {
+          "Content-Type": "application/json-patch+json",
+          Authorization: `basic ${Buffer.from(`:${adoToken}`).toString("base64")}`
+        }
+      });
+
+      console.log(
+        `[Info] Successfully updated ADO Work Item '${workItemId}' to Testing Status '${adoStatus}' ` +
+        `(from qTest: '${qtestStatusLabel || qtestStatusId}')`
+      );
+    } catch (error) {
+      console.error(`[Error] Failed to update ADO Work Item '${workItemId}':`, error.response?.data || error.message);
+      emitFriendlyFailure({
+        platform: "ADO",
+        objectType: "Requirement",
+        objectId: workItemId,
+        fieldName: "Testing Status",
+        fieldValue: adoStatus,
+        detail: "Unable to update Azure DevOps testing status from qTest."
+      });
+    }
+
+  } catch (fatal) {
+    console.error(`[Fatal] Unexpected error:`, fatal.response?.data || fatal.message);
+    emitFriendlyFailure({
+      platform: "ADO",
+      objectType: "Requirement",
+      objectId: event?.requirement?.id || "Unknown",
+      detail: "Unexpected error occurred during requirement status sync."
+    });
+  }
 };
- 
