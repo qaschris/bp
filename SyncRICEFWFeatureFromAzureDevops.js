@@ -1,6 +1,7 @@
 const axios = require("axios");
+const { Webhooks } = require('@qasymphony/pulse-sdk');
 
-exports.handler = async function ({ event, constants }, context, callback) {
+exports.handler = async function ({ event, constants, triggers }, context, callback) {
     // --- Helper functions ---
     function emitEvent(name, payload) {
         let t = triggers.find(t => t.name === name);
