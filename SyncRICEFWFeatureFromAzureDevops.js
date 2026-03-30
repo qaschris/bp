@@ -2,10 +2,27 @@ const axios = require("axios");
 const { Webhooks } = require('@qasymphony/pulse-sdk');
 
 exports.handler = async function ({ event, constants, triggers }, context, callback) {
-    // --- Helper functions ---
     function emitEvent(name, payload) {
-        let t = triggers.find(t => t.name === name);
-        return t && new Webhooks().invoke(t, payload);
+        return (t = triggers.find(t => t.name === name))
+            ? new Webhooks().invoke(t, payload)
+            : console.error(`[ERROR]: (emitEvent) Webhook named '${name}' not found.`);
+    }
+
+    function emitFriendlyFailure(details = {}) {
+        const platform = details.platform || "Unknown";
+        const objectType = details.objectType || "Object";
+        const objectId = details.objectId != null ? details.objectId : "Unknown";
+        const fieldName = details.fieldName ? ` Field: ${details.fieldName}.` : "";
+        const fieldValue = details.fieldValue != null && details.fieldValue !== ""
+            ? ` Value: ${details.fieldValue}.`
+            : "";
+        const detail = details.detail || "Sync failed.";
+
+        const message =
+            `Sync failed. Platform: ${platform}. Object Type: ${objectType}. Object ID: ${objectId}.${fieldName}${fieldValue} Detail: ${detail}`;
+
+        console.error(`[Error] ${message}`);
+        emitEvent('ChatOpsEvent', { message });
     }
 
     function getFields(eventData) {
@@ -45,7 +62,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         }
 
         let cleaned = value
-            .replace(/\s*<[^>]*>/g, "")   // remove <email>
+            .replace(/\s*<[^>]*>/g, "")
             .trim();
 
         return cleaned.replace(/_/g, " ").trim();
@@ -89,17 +106,25 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         const featureType = (fields["Custom.BPFeatureType"] || "").toString().trim();
         const ricefwConfiguration = (fields["BP.ERP.RICEFW"] || "").toString().trim();
         const featureState = (fields["System.State"] || "").toString().trim();
-        console.log(`[Debug] Evaluating if work item is a RICEFW Feature: WorkItemType='${workItemType}', FeatureType='${featureType}', RICEFWConfiguration='${ricefwConfiguration}', State='${featureState}'`);
-        const isRicefwFeature = workItemType.toLowerCase() === "feature" 
-            && (featureType.toLowerCase() === "ricefw" 
-                || featureType.toLowerCase() === "change request") 
-            && (ricefwConfiguration.toLowerCase() === "enhancement"
-                || ricefwConfiguration.toLowerCase() === "form"
-                || ricefwConfiguration.toLowerCase() === "interface"
-                || ricefwConfiguration.toLowerCase() === "report"
-                || ricefwConfiguration.toLowerCase() === "workflow")
-            && (featureState.toLowerCase() !== "rejected"
-                && featureState.toLowerCase() !== "cancelled");
+
+        console.log(
+            `[Debug] Evaluating if work item is a RICEFW Feature: ` +
+            `WorkItemType='${workItemType}', FeatureType='${featureType}', ` +
+            `RICEFWConfiguration='${ricefwConfiguration}', State='${featureState}'`
+        );
+
+        const isRicefwFeature =
+            workItemType.toLowerCase() === "feature" &&
+            (featureType.toLowerCase() === "ricefw" || featureType.toLowerCase() === "change request") &&
+            (
+                ricefwConfiguration.toLowerCase() === "enhancement" ||
+                ricefwConfiguration.toLowerCase() === "form" ||
+                ricefwConfiguration.toLowerCase() === "interface" ||
+                ricefwConfiguration.toLowerCase() === "report" ||
+                ricefwConfiguration.toLowerCase() === "workflow"
+            ) &&
+            (featureState.toLowerCase() !== "rejected" && featureState.toLowerCase() !== "cancelled");
+
         console.log(`[Debug] '${isRicefwFeature}' - Work item ${isRicefwFeature ? "meets" : "does not meet"} criteria for RICEFW Feature.`);
         return isRicefwFeature;
     }
@@ -117,16 +142,10 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         const iterationPath = fields["System.IterationPath"] || "";
         const state = fields["System.State"] || "";
         const reason = fields["System.Reason"] || "";
-        const complexity = fields["Custom.Complexity"] || "";
         const acceptanceCriteria = fields["Microsoft.VSTS.Common.AcceptanceCriteria"] || "";
         const description = fields["System.Description"] || "";
-
-        const featureType = fields["Custom.BPFeatureType"] || "";
         const processRelease = fields["Custom.ProcessRelease"] || "";
         const ricefwId = fields["Custom.RICEFWID"] || "";
-        const ricefwConfiguration = fields["Custom.RICEFWConfiguration"] || "";
-        const testingStatus = fields["Custom.TestingStatus"] || "";
-        const area = fields["Custom.Area"] || "";
 
         return `<a href="${eventData.resource._links.html.href}" target="_blank">Open in Azure DevOps</a><br>
                 <b>Type:</b> ${workItemType}<br>
@@ -140,7 +159,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
                 <b>Description:</b> ${description}`;
     }
 
-    // --- HTTP helpers ---
     const standardHeaders = {
         "Content-Type": "application/json",
         Authorization: `bearer ${constants.QTEST_TOKEN}`,
@@ -153,12 +171,12 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             headers: standardHeaders,
             data: requestBody,
         };
+
         try {
             const response = await axios(opts);
             return response.data;
         } catch (error) {
             console.error(`[Error] HTTP request failed for ${method} ${url}:`, error);
-            emitEvent('ChatOpsEvent', { message: `[Error] HTTP request failed for ${method} ${url}. ${error.message}` });
             throw new Error(`Failed to ${method} ${url}. ${error.message}`);
         }
     }
@@ -171,7 +189,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         return doRequest(url, "PUT", requestBody);
     }
 
-    // --- qTest module helpers ---
     const moduleChildrenCache = {};
 
     async function getSubModules(parentId) {
@@ -205,7 +222,12 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             return items;
         } catch (error) {
             console.error(`[Error] Failed to get sub-modules for parent '${parentId}'.`, error);
-            emitEvent('ChatOpsEvent', { message: `[Error] Failed to get sub-modules for parent '${parentId}'.` });
+            emitFriendlyFailure({
+                platform: "qTest",
+                objectType: "RICEFW/Feature",
+                objectId: "ModulePath",
+                detail: `Unable to retrieve qTest module children for parent '${parentId}'.`
+            });
             throw error;
         }
     }
@@ -217,10 +239,23 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             parent_id: parentId,
         };
 
-        const created = await post(url, requestBody);
-        delete moduleChildrenCache[String(parentId)];
-        console.log(`[Info] Created qTest module '${name}' under parent '${parentId}'.`);
-        return created;
+        try {
+            const created = await post(url, requestBody);
+            delete moduleChildrenCache[String(parentId)];
+            console.log(`[Info] Created qTest module '${name}' under parent '${parentId}'.`);
+            return created;
+        } catch (error) {
+            console.error(`[Error] Failed to create module '${name}' under parent '${parentId}'.`, error);
+            emitFriendlyFailure({
+                platform: "qTest",
+                objectType: "RICEFW/Feature",
+                objectId: "ModulePath",
+                fieldName: "Module",
+                fieldValue: name,
+                detail: `Unable to create qTest module under parent '${parentId}'.`
+            });
+            throw error;
+        }
     }
 
     async function ensureModulePath(rootModuleId, areaPath, iterationPath) {
@@ -257,7 +292,14 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
                 currentParentId = created?.id;
                 if (!currentParentId) {
                     console.error(`[Error] Module creation for '${segment}' did not return an id.`);
-                    emitEvent('ChatOpsEvent', { message: `[Error] Module creation for '${segment}' did not return an id.` });
+                    emitFriendlyFailure({
+                        platform: "qTest",
+                        objectType: "RICEFW/Feature",
+                        objectId: "ModulePath",
+                        fieldName: "Module",
+                        fieldValue: segment,
+                        detail: "Module creation did not return an id."
+                    });
                     throw new Error(`Module creation for '${segment}' did not return an id.`);
                 }
             }
@@ -266,7 +308,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         return currentParentId;
     }
 
-    // --- Requirement CRUD ---
     async function getRequirementByWorkItemId(workItemId) {
         const prefix = getNamePrefix(workItemId);
         const url = `https://${constants.ManagerURL}/api/v3/projects/${constants.ProjectID}/search`;
@@ -288,17 +329,38 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             } else {
                 failed = true;
                 console.log("[Warn] Multiple Requirements found by work item id.");
+                emitFriendlyFailure({
+                    platform: "qTest",
+                    objectType: "RICEFW/Feature",
+                    objectId: workItemId,
+                    detail: "Multiple matching qTest requirements were found for this Azure DevOps feature."
+                });
             }
         } catch (error) {
             console.error("[Error] Failed to get requirement by work item id.", error);
-            emitEvent('ChatOpsEvent', { message: `[Error] Failed to get requirement by work item id.` });
+            emitFriendlyFailure({
+                platform: "qTest",
+                objectType: "RICEFW/Feature",
+                objectId: workItemId,
+                detail: "Unable to locate the matching qTest requirement."
+            });
             failed = true;
         }
 
         return { failed, requirement };
     }
 
-    async function updateRequirement(requirementToUpdate, name, description, fields, complexityValue, workItemTypeValue, priorityValue, typeValue, targetModuleId) {
+    async function updateRequirement(
+        requirementToUpdate,
+        name,
+        description,
+        fields,
+        complexityValue,
+        workItemTypeValue,
+        priorityValue,
+        typeValue,
+        targetModuleId
+    ) {
         const requirementId = requirementToUpdate.id;
         const url = `https://${constants.ManagerURL}/api/v3/projects/${constants.ProjectID}/requirements/${requirementId}?parentId=${targetModuleId}`;
         const requestBody = {
@@ -346,7 +408,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             requestBody.properties.push({ field_id: constants.RequirementApplicationNameFieldID, field_value: applicationName });
         }
 
-        // RICEFW-specific fields (optional constants)
         if (constants.RequirementStateFieldID && state) {
             requestBody.properties.push({ field_id: constants.RequirementStateFieldID, field_value: state });
         }
@@ -383,11 +444,25 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             console.log(`[Info] RICEFW requirement '${requirementId}' updated.`);
         } catch (error) {
             console.error(`[Error] Failed to update RICEFW requirement '${requirementId}'.`, error);
-            emitEvent('ChatOpsEvent', { message: `[Error] Failed to update RICEFW requirement '${requirementId}'.` });
+            emitFriendlyFailure({
+                platform: "qTest",
+                objectType: "RICEFW/Feature",
+                objectId: requirementId,
+                detail: "Unable to update the qTest requirement from Azure DevOps."
+            });
         }
     }
 
-    async function createRequirement(name, description, fields, complexityValue, workItemTypeValue, priorityValue, typeValue, targetModuleId) {
+    async function createRequirement(
+        name,
+        description,
+        fields,
+        complexityValue,
+        workItemTypeValue,
+        priorityValue,
+        typeValue,
+        targetModuleId
+    ) {
         const url = `https://${constants.ManagerURL}/api/v3/projects/${constants.ProjectID}/requirements`;
         const requestBody = {
             name,
@@ -435,7 +510,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             requestBody.properties.push({ field_id: constants.RequirementApplicationNameFieldID, field_value: applicationName });
         }
 
-        // RICEFW-specific fields (optional constants)
         if (constants.RequirementStateFieldID && state) {
             requestBody.properties.push({ field_id: constants.RequirementStateFieldID, field_value: state });
         }
@@ -472,7 +546,12 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             console.log(`[Info] RICEFW requirement created.`);
         } catch (error) {
             console.error(`[Error] Failed to create RICEFW requirement.`, error);
-            emitEvent('ChatOpsEvent', { message: `[Error] Failed to create RICEFW requirement.` });
+            emitFriendlyFailure({
+                platform: "qTest",
+                objectType: "RICEFW/Feature",
+                objectId: "New",
+                detail: "Unable to create the qTest requirement from Azure DevOps."
+            });
         }
     }
 
@@ -484,11 +563,15 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             console.log(`[Info] Requirement '${requirementId}' deleted.`);
         } catch (error) {
             console.error(`[Error] Failed to delete requirement '${requirementId}'.`, error);
-            emitEvent('ChatOpsEvent', { message: `[Error] Failed to delete requirement '${requirementId}'.` });
+            emitFriendlyFailure({
+                platform: "qTest",
+                objectType: "RICEFW/Feature",
+                objectId: requirementId,
+                detail: "Unable to delete the qTest requirement."
+            });
         }
     }
 
-    // --- Main Handler Logic ---
     const eventType = {
         CREATED: "workitem.created",
         UPDATED: "workitem.updated",
@@ -531,7 +614,12 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
         default:
             console.error(`[Error] Unknown workitem event type '${event.eventType}' for 'WI${workItemId}'`);
-            emitEvent('ChatOpsEvent', { message: `[Error] Unknown workitem event type '${event.eventType}' for 'WI${workItemId}'` });
+            emitFriendlyFailure({
+                platform: "ADO",
+                objectType: "RICEFW/Feature",
+                objectId: workItemId || "Unknown",
+                detail: `Unsupported work item event type '${event.eventType}'.`
+            });
             return;
     }
 
