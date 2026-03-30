@@ -2,17 +2,11 @@ const { Webhooks } = require('@qasymphony/pulse-sdk');
 const axios = require('axios');
 
 exports.handler = async function ({ event, constants, triggers }, context, callback) {
-    let iteration;
-    if (event.iteration != undefined) {
-        iteration = event.iteration;
-    } else {
-        iteration = 1;
-    }
+    let iteration = event.iteration != undefined ? event.iteration : 1;
     const maxIterations = 21;
     const defectId = event.defect.id;
-    //const defectPid = event.defect.pid;
     const projectId = event.defect.project_id;
-    //console.log(`[Debug] PID value from qTest event: ${defectPid}`);
+
     console.log(`[Info] Create defect event received for defect '${defectId}' in project '${projectId}'`);
 
     if (projectId != constants.ProjectID) {
@@ -87,36 +81,27 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         Object.entries(AREA_PATH_TO_QTEST_TEAM_VALUE).map(([label, value]) => [String(value), label])
     );
 
-    const defectDetails = await getDefectDetailsByIdWithRetry(defectId);
-    if (!defectDetails) return;
-
-    const bug = await createAzDoBug(
-        defectId,
-        defectDetails.summary,
-        defectDetails.description,
-        defectDetails.link,
-        defectDetails.severity,
-        defectDetails.priority,
-        defectDetails.defectType,
-        defectDetails.status,
-        defectDetails.affectedRelease,
-        defectDetails.createdBy,
-        defectDetails.externalReference,
-        defectDetails.assignedToIdentity,
-        defectDetails.assignedToTeamLabel,
-        defectDetails.targetDate
-    );
-
-    if (!bug) return;
-
-    const workItemId = bug.id;
-    const newSummary = `${getNamePrefix(workItemId)}${defectDetails.summary}`;
-    console.log(`[Info] New defect name: ${newSummary}`);
-    await updateDefectSummary(defectId, constants.DefectSummaryFieldID, newSummary);
-
     function emitEvent(name, payload) {
-        let t = triggers.find(t => t.name === name);
-        return t && new Webhooks().invoke(t, payload);
+        return (t = triggers.find(t => t.name === name))
+            ? new Webhooks().invoke(t, payload)
+            : console.error(`[ERROR]: (emitEvent) Webhook named '${name}' not found.`);
+    }
+
+    function emitFriendlyFailure(details = {}) {
+        const platform = details.platform || "Unknown";
+        const objectType = details.objectType || "Object";
+        const objectId = details.objectId != null ? details.objectId : "Unknown";
+        const fieldName = details.fieldName ? ` Field: ${details.fieldName}.` : "";
+        const fieldValue = details.fieldValue != null && details.fieldValue !== ""
+            ? ` Value: ${details.fieldValue}.`
+            : "";
+        const detail = details.detail || "Sync failed.";
+
+        const message =
+            `Sync failed. Platform: ${platform}. Object Type: ${objectType}. Object ID: ${objectId}.${fieldName}${fieldValue} Detail: ${detail}`;
+
+        console.error(`[Error] ${message}`);
+        emitEvent('ChatOpsEvent', { message });
     }
 
     function getNamePrefix(workItemId) {
@@ -128,6 +113,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             console.log(`[Warn] Obj/properties not found.`);
             return;
         }
+
         const prop = obj.properties.find((p) => p.field_id == fieldId);
         if (!prop) {
             console.log(`[Warn] Property with field id '${fieldId}' not found.`);
@@ -150,6 +136,25 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         return QTEST_TEAM_VALUE_TO_AREA_PATH[String(valueId)] || DEFAULT_AREA_PATH;
     }
 
+    function encodeIfNeeded(url) {
+        try {
+            decodeURIComponent(url);
+            return url;
+        } catch (e) {
+            return encodeURIComponent(url);
+        }
+    }
+
+    function formatDateOnly(value) {
+        if (!value) return value;
+        const date = new Date(value);
+        if (isNaN(date.getTime())) {
+            console.log(`[Warn] Could not parse Target Date '${value}'. Passing original value.`);
+            return value;
+        }
+        return date.toISOString().slice(0, 10);
+    }
+
     async function getDefectDetailsByIdWithRetry(defectId) {
         let defectDetails = undefined;
         let delay = 5000;
@@ -157,108 +162,156 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
         do {
             if (attempt > 0) {
-                console.log(
-                    `[Warn] Could not get defect details on attempt ${attempt}. Waiting ${delay} ms.`
-                );
+                console.log(`[Warn] Could not get defect details on attempt ${attempt}. Waiting ${delay} ms.`);
                 await new Promise((r) => setTimeout(r, delay));
             }
 
             defectDetails = await getDefectDetailsById(defectId);
 
-            // Return immediately once mandatory fields required by ADO are available
             if (
                 defectDetails &&
                 defectDetails.summary &&
                 defectDetails.description &&
                 defectDetails.severity
             ) {
-                console.log(
-                    `[Info] Successfully fetched complete defect details for '${defectId}' on attempt ${attempt + 1}.`
-                );
+                console.log(`[Info] Successfully fetched complete defect details for '${defectId}' on attempt ${attempt + 1}.`);
                 return defectDetails;
             }
 
             attempt++;
         } while (attempt < 12);
 
-        console.error(
-            `[Error] Could not get defect details. User may not have completed the initial save in qTest or the defect was abandoned.`
-        )
-        emitEvent('ChatOpsEvent', { message: '[Error] Could not get defect details. User may not have completed the initial save in qTest or the defect was abandoned.' });
+        console.error(`[Error] Could not get defect details after retry loop. User may not have completed the initial save in qTest or the defect was abandoned.`);
 
         if (iteration < maxIterations) {
             iteration = iteration + 1;
-            console.log(
-                `[Info] Re-executing rule. Iteration ${iteration} of ${maxIterations}.`
-            );
+            console.log(`[Info] Re-executing rule. Iteration ${iteration} of ${maxIterations}.`);
             event.iteration = iteration;
             emitEvent('qTestDefectSubmitted', event);
-        } else {
-            console.error(
-                `[Error] Retry exceeded ${maxIterations} iterations. Rule execution timed out.`
-            );
-            emitEvent('ChatOpsEvent', { message: '[Error] Retry exceeded ${maxIterations} iterations. Rule execution timed out.' });
+            return null;
+        }
+
+        emitFriendlyFailure({
+            platform: "qTest",
+            objectType: "Defect",
+            objectId: defectId,
+            detail: `Unable to retrieve required defect details after ${maxIterations} rule iterations.`
+        });
+
+        return null;
+    }
+
+    async function getDefectById(defectId) {
+        const defectUrl = `https://${constants.ManagerURL}/api/v3/projects/${constants.ProjectID}/defects/${defectId}`;
+
+        console.log(`[Info] Get defect details for '${defectId}'`);
+
+        try {
+            const response = await axios.get(defectUrl, {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `bearer ${constants.QTEST_TOKEN}`
+                }
+            });
+            return response.data;
+        } catch (error) {
+            if (error.response && error.response.status === 404) {
+                emitFriendlyFailure({
+                    platform: "qTest",
+                    objectType: "Defect",
+                    objectId: defectId,
+                    detail: "Defect was not found in qTest and may have been abandoned."
+                });
+                return null;
+            }
+
+            console.error("[Error] Failed to get defect by id.", error);
+
+            emitFriendlyFailure({
+                platform: "qTest",
+                objectType: "Defect",
+                objectId: defectId,
+                detail: "Unable to read defect details from qTest."
+            });
+
+            return null;
         }
     }
 
     async function getDefectDetailsById(defectId) {
         const defect = await getDefectById(defectId);
-
-        if (!defect) return;
+        if (!defect) return null;
 
         const summaryField = getFieldById(defect, constants.DefectSummaryFieldID);
         const descriptionField = getFieldById(defect, constants.DefectDescriptionFieldID);
-        const severityField = getFieldById(defect, constants.DefectSeverityFieldID); // Mapping severity
-        const priorityField = getFieldById(defect, constants.DefectPriorityFieldID); // Mapping Priority
-        const defectTypeField = getFieldById(defect, constants.DefectTypeFieldID); // Mapping Defect Type
-        const statusField = getFieldById(defect, constants.DefectStatusFieldID); //Mapping Status
-        const affectedReleaseField = getFieldById(defect, constants.DefectAffectedReleaseFieldID); // Mapping Affected Release/TestPhase
-        const createdByField = getFieldById(defect, constants.DefectCreatedByFieldID); // Mapping Created By
-        const externalReferenceField = getFieldById(defect, constants.DefectExternalReferenceFieldID); //External Reference
-        const assignedToField = constants.DefectAssignedToFieldID ? getFieldById(defect, constants.DefectAssignedToFieldID) : null; // Assigned To (user id)
+        const severityField = getFieldById(defect, constants.DefectSeverityFieldID);
+        const priorityField = getFieldById(defect, constants.DefectPriorityFieldID);
+        const defectTypeField = getFieldById(defect, constants.DefectTypeFieldID);
+        const statusField = getFieldById(defect, constants.DefectStatusFieldID);
+        const affectedReleaseField = getFieldById(defect, constants.DefectAffectedReleaseFieldID);
+        const createdByField = getFieldById(defect, constants.DefectCreatedByFieldID);
+        const externalReferenceField = getFieldById(defect, constants.DefectExternalReferenceFieldID);
+        const assignedToField = constants.DefectAssignedToFieldID ? getFieldById(defect, constants.DefectAssignedToFieldID) : null;
         const targetDateField = getFieldById(defect, constants.DefectTargetDateFieldID);
-        const targetDate = targetDateField ? targetDateField.field_value : null;
         const assignedToTeamField = constants.DefectAssignedToTeamFieldID ? getFieldById(defect, constants.DefectAssignedToTeamFieldID) : null;
+        const targetDate = targetDateField ? targetDateField.field_value : null;
+
         console.log(`[Info] Defect Target Date: ${targetDate}`);
-        if (!summaryField || !descriptionField || !severityField) {
-            console.error("[Error] Fields not found, exiting.");
-            emitEvent('ChatOpsEvent', { message: '[Error] Fields not found, exiting.' });
-            return; // Prevents using undefined values
-        }
 
         if (!summaryField || !descriptionField || !severityField) {
-            console.error("[Error] Fields not found, exiting.");
-            emitEvent('ChatOpsEvent', { message: '[Error] Fields not found, exiting.' });
-            return; // Prevents using undefined values
+            const missingFields = [];
+            if (!summaryField) missingFields.push("Summary");
+            if (!descriptionField) missingFields.push("Description");
+            if (!severityField) missingFields.push("Severity");
+
+            const missingFieldLabel = missingFields.join(", ");
+
+            console.error(`[Error] Required defect fields not found: ${missingFieldLabel}.`);
+
+            emitFriendlyFailure({
+                platform: "qTest",
+                objectType: "Defect",
+                objectId: defectId,
+                fieldName: missingFieldLabel,
+                detail: "Required field data is missing."
+            });
+
+            return null;
         }
 
         const summary = summaryField.field_value;
         console.log(`[Info] Defect summary: ${summary}`);
+
         const description = descriptionField.field_value;
         console.log(`[Info] Defect description: ${description}`);
+
         const link = defect.web_url;
         console.log(`[Info] Defect link: ${link}`);
+
         const severity = severityField.field_value;
         console.log(`[Info] Defect severity: ${severity}`);
+
         const priority = priorityField ? priorityField.field_value : null;
         console.log(`[Info] Defect priority: ${priority}`);
+
         const defectType = defectTypeField ? defectTypeField.field_value : null;
         console.log(`[Info] Defect type: ${defectType}`);
+
         const status = statusField ? statusField.field_value : null;
         console.log(`[Info] Defect status: ${status}`);
+
         const affectedRelease = affectedReleaseField ? affectedReleaseField.field_value : null;
         console.log(`[Info] Defect Affected Release/TestPhase: ${affectedRelease}`);
+
         let createdBy = createdByField ? createdByField.field_value : null;
         if (createdBy) {
-            createdBy = await getQtestUserName(createdBy);  //Resolve numeric ID → readable name
+            createdBy = await getQtestUserName(createdBy);
         }
         console.log(`[Info] Defect Created By: ${createdBy}`);
+
         const externalReference = externalReferenceField ? externalReferenceField.field_value : null;
         console.log(`[Info] Defect External Reference: ${externalReference}`);
 
-
-        //return { summary: summary, description: description, link: link, severity: severity, priority: priority,};
-        // Resolve qTest Assigned To -> identity (email/UPN) for ADO
         let assignedToIdentity = null;
         if (assignedToField && assignedToField.field_value) {
             assignedToIdentity = await resolveQTestUserIdToIdentity(assignedToField.field_value);
@@ -268,7 +321,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         console.log(`[Info] Defect Assigned To Identity: ${assignedToIdentity}`);
 
         let assignedToTeamLabel = DEFAULT_AREA_PATH;
-
         if (assignedToTeamField) {
             const rawTeamLabel = assignedToTeamField.field_value_name;
             const rawTeamValue = assignedToTeamField.field_value;
@@ -279,9 +331,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
             console.log(`[Info] Defect Assigned to Team Label: ${assignedToTeamLabel}`);
         } else {
-            console.log(
-                `[Info] Defect Assigned to Team is blank in qTest. Defaulting ADO AreaPath to '${DEFAULT_AREA_PATH}'.`
-            );
+            console.log(`[Info] Defect Assigned to Team is blank in qTest. Defaulting ADO AreaPath to '${DEFAULT_AREA_PATH}'.`);
         }
 
         return {
@@ -301,61 +351,28 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         };
     }
 
-    async function getDefectById(defectId) {
-        const defectUrl = `https://${constants.ManagerURL}/api/v3/projects/${constants.ProjectID}/defects/${defectId}`;
-
-        console.log(`[Info] Get defect details for '${defectId}'`);
-
-        try {
-            const response = await axios.get(defectUrl, {
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `bearer ${constants.QTEST_TOKEN}`
-                }
-            });
-            return response.data;
-        } catch (error) {
-            if (error.response && error.response.status === 404) {
-                console.error(`[Error] qTest returned 404 — defect '${defectId}' not found (abandoned).`);
-                emitEvent('ChatOpsEvent', { message: `[Error] qTest returned 404 — defect '${defectId}' not found (abandoned).` });
-                return null; // Important: return null, not undefined
-            }
-            console.error("[Error] Failed to get defect by id.", error);
-            emitEvent('ChatOpsEvent', { message: '[Error] Failed to get defect by id.' });
-            return null;
-        }
-    }
-
-    //Severity Mapping (qTest → ADO)
     function mapSeverity(qtestSeverity) {
-        const severityId = parseInt(qtestSeverity);  // force numeric comparison
+        const severityId = parseInt(qtestSeverity);
         switch (severityId) {
-            case 10301:
-                return '1 - Critical';
-            case 10302:
-                return '2 - High';
-            case 10303:
-                return '3 - Medium';
-            case 10304:
-                return '4 - Low';
-            default:
-                return '3 - Medium';
+            case 10301: return '1 - Critical';
+            case 10302: return '2 - High';
+            case 10303: return '3 - Medium';
+            case 10304: return '4 - Low';
+            default: return '3 - Medium';
         }
     }
 
-    // Priority Mapping (qTest → ADO)
     function mapPriority(qtestPriority) {
         const priorityId = parseInt(qtestPriority);
         switch (priorityId) {
-            case 11169: return 1; // Very High
-            case 10204: return 2; // High
-            case 10203: return 3; // Medium
-            case 10202: return 4; // Low
-            default: return 3;    // Default Medium
+            case 11169: return 1;
+            case 10204: return 2;
+            case 10203: return 3;
+            case 10202: return 4;
+            default: return 3;
         }
     }
 
-    // Defect Type Mapping ((qTest → ADO))
     function mapDefectType(qtestDefectType) {
         const id = parseInt(qtestDefectType);
         switch (id) {
@@ -369,11 +386,10 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             case 963: return "User Handling";
             case 964: return "Translation";
             case 965: return "Automation";
-            default: return null; // null means skip this field
+            default: return null;
         }
     }
 
-    // qTest → ADO Status Mapping
     function mapStatus(qtestStatus) {
         const statusId = parseInt(qtestStatus);
         switch (statusId) {
@@ -387,15 +403,14 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             case 10881: return "Closed";
             case 10883: return "On Hold";
             case 10853: return "Rejected";
-            default: return "New"; // null means skip this field
+            default: return "New";
         }
     }
 
-    // qTest → ADO Bug Stage Mapping
     function mapAffectedRelease(qtestRelease) {
         const releaseId = parseInt(qtestRelease);
         switch (releaseId) {
-            case -510: return null; // Skip "P&O Release 1"
+            case -510: return null;
             case 283: return "P&O_R1_SIT Dry Run";
             case 279: return "P&O_R1_SIT1";
             case 280: return "P&O_R1_SIT2";
@@ -403,11 +418,10 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             case 285: return "P&O_R1_DC2";
             case 286: return "P&O_R1_DC3";
             case 287: return "P&O_R1_UAT";
-            default: return null; // Unknown or not set
+            default: return null;
         }
     }
 
-    // Helper: Fetch qTest user display name by user ID
     async function getQtestUserName(userId) {
         if (!userId) return null;
 
@@ -421,11 +435,9 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             });
 
             const userData = response.data;
-
-            // Prefer formatted readable name (first_name + last_name)
             let displayName = "";
+
             if (userData.first_name && userData.last_name) {
-                // Preserve comma pattern exactly as stored in qTest
                 displayName = `${userData.first_name.trim()} ${userData.last_name.trim()}`;
             } else if (userData.last_name) {
                 displayName = userData.last_name.trim();
@@ -435,31 +447,30 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
             console.log(`[Info] Resolved qTest user ID '${userId}' to name '${displayName}'`);
             return displayName;
-
         } catch (error) {
             console.error(`[Error] Could not resolve qTest user ID '${userId}' to name. Using ID instead.`);
-            emitEvent('ChatOpsEvent', { message: `[Error] Could not resolve qTest user ID '${userId}' to name. Using ID instead.` });
             return userId.toString();
         }
     }
 
-        async function createAzDoBug(
-            defectId,
-            name,
-            description,
-            link,
-            qtestSeverity,
-            qtestPriority,
-            qtestDefectType,
-            qtestStatus,
-            qtestAffectedRelease,
-            qtestCreatedBy,
-            qtestExternalReference,
-            qtestAssignedToIdentity,
-            qtestAssignedToTeamLabel,
-            qtestTargetDate
-        ) {
+    async function createAzDoBug(
+        defectId,
+        name,
+        description,
+        link,
+        qtestSeverity,
+        qtestPriority,
+        qtestDefectType,
+        qtestStatus,
+        qtestAffectedRelease,
+        qtestCreatedBy,
+        qtestExternalReference,
+        qtestAssignedToIdentity,
+        qtestAssignedToTeamLabel,
+        qtestTargetDate
+    ) {
         console.log(`[Info] Creating bug in Azure DevOps '${defectId}'`);
+
         const baseUrl = encodeIfNeeded(constants.AzDoProjectURL);
         const url = `${baseUrl}/_apis/wit/workitems/$Bug?api-version=6.0`;
 
@@ -483,40 +494,16 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         }
 
         const requestBody = [
-            {
-                op: "add",
-                path: "/fields/System.Title",
-                value: name,
-            },
-            {
-                op: "add",
-                path: "/fields/Microsoft.VSTS.TCM.ReproSteps",
-                value: description,
-            },
-            {
-                op: "add",
-                path: "/fields/System.Tags",
-                value: "qTest-Dev",
-            },
-            {
-                op: "add",
-                path: "/fields/System.State",
-                value: mappedStatus,
-            },
-            {
-                op: "add",
-                path: "/fields/Microsoft.VSTS.Common.Severity",
-                value: mappedSeverity,
-            },
-            {
-                op: "add",
-                path: "/fields/Microsoft.VSTS.Common.Priority",
-                value: mappedPriority,
-            },
+            { op: "add", path: "/fields/System.Title", value: name },
+            { op: "add", path: "/fields/Microsoft.VSTS.TCM.ReproSteps", value: description },
+            { op: "add", path: "/fields/System.Tags", value: "qTest-Dev" },
+            { op: "add", path: "/fields/System.State", value: mappedStatus },
+            { op: "add", path: "/fields/Microsoft.VSTS.Common.Severity", value: mappedSeverity },
+            { op: "add", path: "/fields/Microsoft.VSTS.Common.Priority", value: mappedPriority },
             {
                 op: "add",
                 path: "/fields/System.AreaPath",
-                value: normalizeAreaPathLabel(qtestAssignedToTeamLabel) || DEFAULT_AREA_PATH,
+                value: normalizeAreaPathLabel(qtestAssignedToTeamLabel) || DEFAULT_AREA_PATH
             },
             {
                 op: "add",
@@ -528,7 +515,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             },
         ];
 
-        // Assigned To (qTest -> ADO)
         const adoAssignedToRef = constants.AzDoAssignedToFieldRef || "System.AssignedTo";
         if (qtestAssignedToIdentity && String(qtestAssignedToIdentity).trim()) {
             requestBody.push({
@@ -583,7 +569,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             console.log(`[Info] Skipping External Reference — no value in qTest`);
         }
 
-        // Add Target Date (date only)
         if (qtestTargetDate) {
             requestBody.push({
                 op: "add",
@@ -592,7 +577,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             });
         }
 
-        // --- Log full request before sending ---
         console.log(`[Debug] POST URL: ${url}`);
         console.log(`[Debug] Payload: ${JSON.stringify(requestBody, null, 2)}`);
 
@@ -609,21 +593,25 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             console.log(`[Error] Failed to create bug in Azure DevOps: ${error}`);
             if (error.response) {
                 console.log(`[Error] Failed to create bug in Azure DevOps. Status: ${error.response.status}`);
-                console.log(`[Error] Status: ${error.response.status}`);
-                console.log(`[Error] Data: ${JSON.stringify(error.response && error.response.data ? error.response.data : null, null, 2)}`);
-                emitEvent('ChatOpsEvent', { message: `[Error] Failed to create bug in Azure DevOps. Status: ${error.response.status}` });
+                console.log(`[Error] Data: ${JSON.stringify(error.response.data || null, null, 2)}`);
             } else if (error.request) {
                 console.log(`[Error] No response received from ADO. Possible network or permission issue.`);
                 console.log(`[Error] Request: ${JSON.stringify(error.request, null, 2)}`);
-                emitEvent('ChatOpsEvent', { message: '[Error] No response received from ADO. Possible network or permission issue.' });
             } else {
                 console.log(`[Error] Raw: ${JSON.stringify(error, null, 2)}`);
-                console.log(`[Error] Raw: ${error.message}`);
-                console.log(`[Error] Response: ${JSON.stringify(error.response && error.response.data ? error.response.data : null, null, 2)}`);
-                emitEvent('ChatOpsEvent', { message: `[Error] Failed to create bug in Azure DevOps. Status: ${error.response.status}` });
-                console.log(`[Debug] ADO Request Payload: ${JSON.stringify(requestBody, null, 2)}`);
+                console.log(`[Error] Message: ${error.message}`);
             }
+
+            console.log(`[Debug] ADO Request Payload: ${JSON.stringify(requestBody, null, 2)}`);
             console.log(`[Debug] Full error object: ${JSON.stringify(error, Object.getOwnPropertyNames(error), 2)}`);
+
+            emitFriendlyFailure({
+                platform: "ADO",
+                objectType: "Defect",
+                objectId: defectId,
+                detail: "Unable to create defect in Azure DevOps."
+            });
+
             return null;
         }
     }
@@ -649,22 +637,27 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
                 }
             });
             console.log(`[Info] Defect '${defectId}' updated.`);
+            return true;
         } catch (error) {
             console.log(`[Error] Failed to update defect '${defectId}'.`, error);
-            emitEvent('ChatOpsEvent', { message: `[Error] Failed to update defect '${defectId}'.` });
+
+            emitFriendlyFailure({
+                platform: "qTest",
+                objectType: "Defect",
+                objectId: defectId,
+                fieldName: "Summary",
+                fieldValue: fieldValue,
+                detail: "Unable to update qTest defect after Azure DevOps creation."
+            });
+
+            return false;
         }
     }
 
     async function resolveQTestUserIdToIdentity(userId) {
-        // Returns a string we can send to ADO's System.AssignedTo.
-        // BP qTest SSO: email may be blank; username typically holds the UPN/email.
         if (!userId) return null;
 
-        // Build URL without encodeIfNeeded (it can mangle already-good URLs).
-        // Prefer a single canonical base URL variable in your rule (whatever you use elsewhere).
         const base = (constants.qtesturl || constants.ManagerURL || "").trim();
-
-        // Ensure base has scheme and no trailing slash
         const normalizedBase = base.startsWith("http")
             ? base.replace(/\/+$/, "")
             : `https://${base.replace(/\/+$/, "")}`;
@@ -684,17 +677,10 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             const data = response?.data;
             if (!data) return null;
 
-            // Handle both shapes:
-            // 1) direct user object: { id, username, email, ... }
-            // 2) wrapper: { items: [ { id, username, ... } ], total, ... }
             const u = Array.isArray(data?.items) ? data.items[0] : data;
             if (!u) return null;
 
-            // Identity preference for BP:
-            // - If email is populated, it's fine to use it, but SSO often leaves it blank.
-            // - username/ldap/external are usually the UPN you want for ADO.
             const identity =
-                //(u.email && u.email.trim()) || //BP SSO often results in blank email, so deprioritizing email in favor of username fields
                 (u.username && u.username.trim()) ||
                 (u.ldap_username && u.ldap_username.trim()) ||
                 (u.external_user_name && u.external_user_name.trim()) ||
@@ -702,49 +688,53 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
                 null;
 
             if (identity) {
-                console.log(
-                    `[Info] Resolved qTest user ID '${userId}' to identity '${identity}' ` +
-                    `(email may be blank for SSO users)`
-                );
+                console.log(`[Info] Resolved qTest user ID '${userId}' to identity '${identity}' (email may be blank for SSO users)`);
             } else {
-                console.log(
-                    `[Warn] qTest user ID '${userId}' has no usable identity fields ` +
-                    `(email/username/ldap_username/external_*).`
-                );
+                console.log(`[Warn] qTest user ID '${userId}' has no usable identity fields (email/username/ldap_username/external_*).`);
             }
 
             return identity;
         } catch (error) {
-            // This is the key: log axios error details that explain "no response".
             const status = error?.response?.status;
             const code = error?.code;
             const msg = error?.message;
 
             if (status) {
-                console.log(
-                    `[Warn] Could not resolve qTest user ID '${userId}' to identity. ` +
-                    `HTTP ${status}.`
-                );
+                console.log(`[Warn] Could not resolve qTest user ID '${userId}' to identity. HTTP ${status}.`);
             } else {
-                console.log(
-                    `[Warn] Could not resolve qTest user ID '${userId}' to identity. ` +
-                    `No HTTP response. code=${code || "n/a"} message=${msg || "n/a"} url=${url}`
-                );
+                console.log(`[Warn] Could not resolve qTest user ID '${userId}' to identity. No HTTP response. code=${code || "n/a"} message=${msg || "n/a"} url=${url}`);
             }
+
             return null;
         }
     }
 
-    function encodeIfNeeded(url) {
-        try {
-            // Decode the URL to check if it's already encoded
-            let decodedUrl = decodeURIComponent(url);
-            // If decoding is successful, the URL was already encoded
-            return url;
-        } catch (e) {
-            // If decoding fails, the URL needs to be encoded
-            return encodeURIComponent(url);
-        }
-    }
+    const defectDetails = await getDefectDetailsByIdWithRetry(defectId);
+    if (!defectDetails) return;
+
+    const bug = await createAzDoBug(
+        defectId,
+        defectDetails.summary,
+        defectDetails.description,
+        defectDetails.link,
+        defectDetails.severity,
+        defectDetails.priority,
+        defectDetails.defectType,
+        defectDetails.status,
+        defectDetails.affectedRelease,
+        defectDetails.createdBy,
+        defectDetails.externalReference,
+        defectDetails.assignedToIdentity,
+        defectDetails.assignedToTeamLabel,
+        defectDetails.targetDate
+    );
+
+    if (!bug) return;
+
+    const workItemId = bug.id;
+    const newSummary = `${getNamePrefix(workItemId)}${defectDetails.summary}`;
+    console.log(`[Info] New defect name: ${newSummary}`);
+
+    const summaryUpdated = await updateDefectSummary(defectId, constants.DefectSummaryFieldID, newSummary);
+    if (!summaryUpdated) return;
 };
- 
