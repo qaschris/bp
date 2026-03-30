@@ -2,10 +2,27 @@ const axios = require("axios");
 const { Webhooks } = require('@qasymphony/pulse-sdk');
 
 exports.handler = async function ({ event, constants, triggers }, context, callback) {
-    // --- Helper functions ---
     function emitEvent(name, payload) {
-        let t = triggers.find(t => t.name === name);
-        return t && new Webhooks().invoke(t, payload);
+        return (t = triggers.find(t => t.name === name))
+            ? new Webhooks().invoke(t, payload)
+            : console.error(`[ERROR]: (emitEvent) Webhook named '${name}' not found.`);
+    }
+
+    function emitFriendlyFailure(details = {}) {
+        const platform = details.platform || "Unknown";
+        const objectType = details.objectType || "Object";
+        const objectId = details.objectId != null ? details.objectId : "Unknown";
+        const fieldName = details.fieldName ? ` Field: ${details.fieldName}.` : "";
+        const fieldValue = details.fieldValue != null && details.fieldValue !== ""
+            ? ` Value: ${details.fieldValue}.`
+            : "";
+        const detail = details.detail || "Sync failed.";
+
+        const message =
+            `Sync failed. Platform: ${platform}. Object Type: ${objectType}. Object ID: ${objectId}.${fieldName}${fieldValue} Detail: ${detail}`;
+
+        console.error(`[Error] ${message}`);
+        emitEvent('ChatOpsEvent', { message });
     }
 
     function getFitGap(eventData) {
@@ -33,7 +50,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     }
 
     function getFields(eventData) {
-        // In case of update the fields can be taken from the revision, in case of create from the resource directly
         return eventData.resource.revision ? eventData.resource.revision.fields : eventData.resource.fields;
     }
 
@@ -69,7 +85,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         return `WI${workItemId}: `;
     }
 
-    // --- HTTP helpers ---
     const standardHeaders = {
         "Content-Type": "application/json",
         Authorization: `bearer ${constants.QTEST_TOKEN}`,
@@ -101,7 +116,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         }
 
         let cleaned = value
-            .replace(/\s*<[^>]*>/g, "")   // remove <email>
+            .replace(/\s*<[^>]*>/g, "")
             .trim();
 
         return cleaned.replace(/_/g, " ").trim();
@@ -152,21 +167,16 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             console.error(`[Error] URL: ${url}`);
             console.error(`[Error] Method: ${method}`);
             console.error(`[Error] Message: ${error.message}`);
-            console.error(`[Error] URL: ${url}`);
-            emitEvent('ChatOpsEvent', { message: `[Error] HTTP request failed for ${method} ${url}: ${error.message}` });
 
             if (error.response) {
                 console.error(`[Error] HTTP Status: ${error.response.status}`);
                 console.error(`[Error] Error Response Headers: ${safeJson(error.response.headers)}`);
                 console.error(`[Error] Error Response Body: ${safeJson(error.response.data)}`);
-                emitEvent('ChatOpsEvent', { message: `[Error] HTTP request failed for ${method} ${url}: ${error.message}` });
             } else if (error.request) {
                 console.error(`[Error] No HTTP response received.`);
                 console.error(`[Error] Raw Request Object: ${safeJson(error.request)}`);
-                emitEvent('ChatOpsEvent', { message: `[Error] HTTP request failed for ${method} ${url}: No response received` });
             } else {
                 console.error(`[Error] Axios config/setup error: ${safeJson(error)}`);
-                emitEvent('ChatOpsEvent', { message: `[Error] HTTP request failed for ${method} ${url}: Axios config/setup error` });
             }
 
             throw new Error(`Failed to ${method} ${url}. ${error.message}`);
@@ -201,9 +211,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             .map(s => s.trim())
             .filter(Boolean);
 
-        // Usually the release indicator is in the second node, e.g.
-        // bp_Quantum\P_O R1.0 (Castellon and Kwinana)
-        // bp_Quantum\P_O R1.1 Whiting
         const candidate = segments.length > 1 ? segments[1] : segments[0];
 
         if (!candidate) {
@@ -249,7 +256,12 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             return items;
         } catch (error) {
             console.error(`[Error] Failed to get sub-modules for parent '${parentId}'.`, error);
-            emitEvent('ChatOpsEvent', { message: `[Error] Failed to get sub-modules for parent '${parentId}'.` });
+            emitFriendlyFailure({
+                platform: "qTest",
+                objectType: "Requirement",
+                objectId: "ModulePath",
+                detail: `Unable to retrieve qTest module children for parent '${parentId}'.`
+            });
             throw error;
         }
     }
@@ -268,7 +280,14 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             return created;
         } catch (error) {
             console.error(`[Error] Failed to create module '${name}' under parent '${parentId}'.`, error);
-            emitEvent('ChatOpsEvent', { message: `[Error] Failed to create module '${name}' under parent '${parentId}'.` });
+            emitFriendlyFailure({
+                platform: "qTest",
+                objectType: "Requirement",
+                objectId: "ModulePath",
+                fieldName: "Module",
+                fieldValue: name,
+                detail: `Unable to create qTest module under parent '${parentId}'.`
+            });
             throw error;
         }
     }
@@ -278,8 +297,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
         let areaSegments = normalizeAreaPathSegments(areaPath);
 
-        // Drop the first AreaPath node if it is the project root (bp_Quantum),
-        // because the release folder replaces that top-level bucket.
         if (areaSegments.length && areaSegments[0].toLowerCase() === "bp_quantum") {
             areaSegments = areaSegments.slice(1);
         }
@@ -323,7 +340,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         return currentParentId;
     }
 
-    // --- Requirement CRUD ---
     async function getRequirementByWorkItemId(workItemId) {
         const prefix = getNamePrefix(workItemId);
         const url = `https://${constants.ManagerURL}/api/v3/projects/${constants.ProjectID}/search`;
@@ -342,27 +358,55 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             console.log(`[Debug] Search Payload: ${safeJson(requestBody)}`);
             const response = await post(url, requestBody);
             console.log(`[Debug] Search Response: ${safeJson(response)}`);
+
             if (!response || response.total === 0) {
                 console.log("[Info] Requirement not found by work item id.");
             } else if (response.total === 1) {
-                console.log(`[Debug] Requirement matched for update: ${safeJson(requirement)}`);
                 requirement = response.items[0];
+                console.log(`[Debug] Requirement matched for update: ${safeJson(requirement)}`);
             } else {
                 failed = true;
                 console.log("[Warn] Multiple Requirements found by work item id.");
+                emitFriendlyFailure({
+                    platform: "qTest",
+                    objectType: "Requirement",
+                    objectId: workItemId,
+                    detail: "Multiple matching qTest requirements were found for this Azure DevOps work item."
+                });
             }
         } catch (error) {
             console.error("[Error] Failed to get requirement by work item id.", error);
-            emitEvent('ChatOpsEvent', { message: "[Error] Failed to get requirement by work item id." });
+            emitFriendlyFailure({
+                platform: "qTest",
+                objectType: "Requirement",
+                objectId: workItemId,
+                detail: "Unable to locate the matching qTest requirement."
+            });
             failed = true;
         }
 
         return { failed, requirement };
     }
 
-    async function updateRequirement(requirementToUpdate, name, description, areaPath, complexityValue, workItemTypeValue, priorityValue, typeValue, assignedTo, iterationPath, applicationName, fitGap, bpEntity, targetModuleId) {
+    async function updateRequirement(
+        requirementToUpdate,
+        name,
+        description,
+        areaPath,
+        complexityValue,
+        workItemTypeValue,
+        priorityValue,
+        typeValue,
+        assignedTo,
+        iterationPath,
+        applicationName,
+        fitGap,
+        bpEntity,
+        targetModuleId
+    ) {
         const requirementId = requirementToUpdate.id;
-        const url = `https://${constants.ManagerURL}/api/v3/projects/${constants.ProjectID}/requirements/${requirementId}?parentId=${targetModuleId}`;        const requestBody = {
+        const url = `https://${constants.ManagerURL}/api/v3/projects/${constants.ProjectID}/requirements/${requirementId}?parentId=${targetModuleId}`;
+        const requestBody = {
             name,
             properties: [
                 { field_id: constants.RequirementDescriptionFieldID, field_value: description },
@@ -376,6 +420,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
                 field_value: complexityValue,
             });
         }
+
         if (workItemTypeValue) {
             requestBody.properties.push({
                 field_id: constants.RequirementWorkItemTypeFieldID,
@@ -396,6 +441,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
                 field_value: typeValue,
             });
         }
+
         console.log(`[Debug] Raw AssignedTo before normalization: ${safeJson(assignedTo)}`);
         if (assignedTo) {
             let removed_email = normalizeAssignedTo(assignedTo);
@@ -405,12 +451,14 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
                 field_value: removed_email,
             });
         }
+
         if (iterationPath) {
             requestBody.properties.push({
                 field_id: constants.RequirementIterationPathFieldID,
                 field_value: iterationPath,
             });
         }
+
         if (applicationName) {
             requestBody.properties.push({
                 field_id: constants.RequirementApplicationNameFieldID,
@@ -442,11 +490,30 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             console.log(`[Info] Requirement '${requirementId}' updated.`);
         } catch (error) {
             console.error(`[Error] Failed to update requirement '${requirementId}'.`, error);
-            emitEvent('ChatOpsEvent', { message: `[Error] Failed to update requirement '${requirementId}'.` });
+            emitFriendlyFailure({
+                platform: "qTest",
+                objectType: "Requirement",
+                objectId: requirementId,
+                detail: "Unable to update the qTest requirement from Azure DevOps."
+            });
         }
     }
 
-    async function createRequirement(name, description, areaPath, complexityValue, workItemTypeValue, priorityValue, typeValue, assignedTo, iterationPath, applicationName, fitGap, bpEntity, targetModuleId) {
+    async function createRequirement(
+        name,
+        description,
+        areaPath,
+        complexityValue,
+        workItemTypeValue,
+        priorityValue,
+        typeValue,
+        assignedTo,
+        iterationPath,
+        applicationName,
+        fitGap,
+        bpEntity,
+        targetModuleId
+    ) {
         const url = `https://${constants.ManagerURL}/api/v3/projects/${constants.ProjectID}/requirements`;
         const requestBody = {
             name,
@@ -463,6 +530,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
                 field_value: complexityValue,
             });
         }
+
         if (workItemTypeValue) {
             requestBody.properties.push({
                 field_id: constants.RequirementWorkItemTypeFieldID,
@@ -483,6 +551,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
                 field_value: typeValue,
             });
         }
+
         console.log(`[Debug] Raw AssignedTo before normalization: ${safeJson(assignedTo)}`);
         if (assignedTo) {
             let removed_email = normalizeAssignedTo(assignedTo);
@@ -491,26 +560,29 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
                 field_id: constants.RequirementAssignedToFieldID,
                 field_value: removed_email,
             });
-
         }
+
         if (iterationPath) {
             requestBody.properties.push({
                 field_id: constants.RequirementIterationPathFieldID,
                 field_value: iterationPath,
             });
         }
+
         if (applicationName) {
             requestBody.properties.push({
                 field_id: constants.RequirementApplicationNameFieldID,
                 field_value: applicationName,
             });
         }
+
         if (fitGap !== null && fitGap !== undefined) {
             requestBody.properties.push({
                 field_id: constants.RequirementFitGapFieldID,
                 field_value: fitGap
             });
         }
+
         if (bpEntity !== null && bpEntity !== undefined) {
             requestBody.properties.push({
                 field_id: constants.RequirementBPEntityFieldID,
@@ -527,7 +599,12 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             console.log(`[Info] Requirement created.`);
         } catch (error) {
             console.error(`[Error] Failed to create requirement`, error);
-            emitEvent('ChatOpsEvent', { message: `[Error] Failed to create requirement` });
+            emitFriendlyFailure({
+                platform: "qTest",
+                objectType: "Requirement",
+                objectId: "New",
+                detail: "Unable to create the qTest requirement from Azure DevOps."
+            });
         }
     }
 
@@ -539,11 +616,15 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             console.log(`[Info] Requirement '${requirementId}' deleted.`);
         } catch (error) {
             console.error(`[Error] Failed to delete requirement '${requirementId}'.`, error);
-            emitEvent('ChatOpsEvent', { message: `[Error] Failed to delete requirement '${requirementId}'.` });
+            emitFriendlyFailure({
+                platform: "qTest",
+                objectType: "Requirement",
+                objectId: requirementId,
+                detail: "Unable to delete the qTest requirement."
+            });
         }
     }
 
-    // --- Main Handler Logic ---
     const eventType = {
         CREATED: "workitem.created",
         UPDATED: "workitem.updated",
@@ -584,11 +665,15 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
         default:
             console.error(`[Error] Unknown workitem event type '${event.eventType}' for 'WI${workItemId}'`);
-            emitEvent('ChatOpsEvent', { message: `[Error] Unknown workitem event type '${event.eventType}' for 'WI${workItemId}'` });
+            emitFriendlyFailure({
+                platform: "ADO",
+                objectType: "Requirement",
+                objectId: workItemId || "Unknown",
+                detail: `Unsupported work item event type '${event.eventType}'.`
+            });
             return;
     }
 
-    // Prepare data
     const namePrefix = getNamePrefix(workItemId);
     const requirementDescription = buildRequirementDescription(event);
     const requirementName = buildRequirementName(namePrefix, event);
@@ -692,4 +777,3 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         );
     }
 };
- 
