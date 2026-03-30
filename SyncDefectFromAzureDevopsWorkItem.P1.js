@@ -2,41 +2,40 @@
 
     // DO NOT EDIT exported "handler" function is the entrypoint
     exports.handler = async function ({ event, constants, triggers }, context, callback) {
+
+
         function buildDefectDescription(eventData) {
             const fields = getFields(eventData);
             return `Link to Azure DevOps: ${eventData.resource._links.html.href}
-    Repro steps: 
-    ${htmlToPlainText(fields["Microsoft.VSTS.TCM.ReproSteps"])}`;
-        }
-    //     return `Link to Azure DevOps: ${eventData.resource._links.html.href}
-    // Type: ${fields["System.WorkItemType"]}
-    // Area: ${fields["System.AreaPath"]}
-    // Iteration: ${fields["System.IterationPath"]}
-    // State: ${fields["System.State"]}
-    // Reason: ${fields["System.Reason"]}
-    // Severity: ${fields["Microsoft.VSTS.Common.Severity"] || ""}
-    // Priority: ${fields["Microsoft.VSTS.Common.Priority"] || ""}
-    // Root Cause: ${fields["Microsoft.VSTS.CMMI.RootCause"] || ""}
-    // Repro steps: 
-    // ${htmlToPlainText(fields["Microsoft.VSTS.TCM.ReproSteps"])}
-    // System info:
-    // ${htmlToPlainText(fields["Microsoft.VSTS.TCM.SystemInfo"])}
-    // Acceptance criteria:
-    // ${htmlToPlainText(fields["Microsoft.VSTS.Common.AcceptanceCriteria"])}`;
-    //     }
-        function emitEvent(name, payload) {
-            let t = triggers.find(t => t.name === name);
-            return t && new Webhooks().invoke(t, payload);
-        }
-
+                Repro steps: 
+                ${htmlToPlainText(fields["Microsoft.VSTS.TCM.ReproSteps"])}`;
+                    }
         function buildDefectSummary(namePrefix, eventData) {
             const fields = getFields(eventData);
             return `${namePrefix}${fields["System.Title"]}`;
         }
 
+        function emitEvent(name, payload) {
+            let t = triggers.find(t => t.name === name);
+            return t && new Webhooks().invoke(t, payload);
+        }
+
         function getFields(eventData) {
             // In case of update the fields can be taken from the revision, in case of create from the resource directly
             return eventData.resource.revision ? eventData.resource.revision.fields : eventData.resource.fields;
+        }
+
+        function normalizeAreaPathLabel(value) {
+            return typeof value === "string" ? value.trim() : "";
+        }
+
+        function mapAreaPathToQtestTeamValue(areaPath) {
+            const label = normalizeAreaPathLabel(areaPath);
+            return AREA_PATH_TO_QTEST_TEAM_VALUE[label] || DEFAULT_ASSIGNED_TO_TEAM_VALUE;
+        }
+
+        function mapQtestTeamValueToAreaPath(valueId) {
+            return QTEST_TEAM_VALUE_TO_AREA_PATH[String(valueId)] || DEFAULT_AREA_PATH;
         }
 
         function extractUpnOrEmailFromAdoAssignedTo(raw) {
@@ -191,6 +190,20 @@
         const defectDescription = buildDefectDescription(event);
         const defectSummary = buildDefectSummary(namePrefix, event);
         const fields = getFields(event);
+
+        const adoAreaPath = fields[constants.AzDoAreaPathFieldRef || "System.AreaPath"] || "";
+        console.log(`[Info] ADO AreaPath value: '${adoAreaPath}'`);
+
+        const qtestAssignedToTeamValue = mapAreaPathToQtestTeamValue(adoAreaPath);
+        console.log(
+            `[Info] Mapped ADO AreaPath '${adoAreaPath || "(blank)"}' to qTest Assigned to Team value '${qtestAssignedToTeamValue}'`
+        );
+
+        if (!AREA_PATH_TO_QTEST_TEAM_VALUE[normalizeAreaPathLabel(adoAreaPath)]) {
+            console.log(
+                `[Warn] ADO AreaPath '${adoAreaPath || "(blank)"}' not found in qTest team mapping. Defaulting to '${DEFAULT_AREA_PATH}' (${DEFAULT_ASSIGNED_TO_TEAM_VALUE}).`
+            );
+        }
 
         // Fetch ADO comments
         let adoComments = await getAdoComments(workItemId);
@@ -382,6 +395,73 @@
             `[Info] Mapped ADO Resolved Reason '${adoResolvedReason}' → qTest value '${qtestResolvedReasonValue}'`
         );
 
+        const DEFAULT_AREA_PATH = "bp_Quantum\\Technical\\Testing";
+        const DEFAULT_ASSIGNED_TO_TEAM_VALUE = 1189;
+
+        const AREA_PATH_TO_QTEST_TEAM_VALUE = {
+            "bp_Quantum\\Process\\Asset Management\\Squad 1 - Data": 1,
+            "bp_Quantum\\Process\\Asset Management\\AM - Work Mgmt Core": 2,
+            "bp_Quantum\\Process\\Finance\\Finance - Capex Squad": 3,
+            "bp_Quantum\\Process\\Finance\\Finance - CB Hub 2.0 Squad": 4,
+            "bp_Quantum\\Process\\Finance\\Finance - R2R Squad": 6,
+            "bp_Quantum\\Process\\Finance\\Finance - Tax Squad": 7,
+            "bp_Quantum\\Process\\Procurement\\Invoice to Pay": 8,
+            "bp_Quantum\\Process\\Procurement\\Quality and Logistics": 9,
+            "bp_Quantum\\Process\\Procurement\\Services Procurement": 10,
+            "bp_Quantum\\Process\\Procurement\\Materials Procurement": 11,
+            "bp_Quantum\\Process\\Procurement\\Source to Contract": 12,
+            "bp_Quantum\\Process\\Procurement\\Materials and Inventory": 13,
+            "bp_Quantum\\Process\\MDG\\Asset Management": 14,
+            "bp_Quantum\\Process\\MDG\\Procurement": 15,
+            "bp_Quantum\\Process\\MDG\\Finance": 16,
+            "bp_Quantum\\Process\\MDG\\Material": 17,
+            "bp_Quantum\\Data and Analytics\\ETL\\Asset Management": 18,
+            "bp_Quantum\\Data and Analytics\\ETL\\Customer Management": 19,
+            "bp_Quantum\\Data and Analytics\\ETL\\Finance": 20,
+            "bp_Quantum\\Data and Analytics\\ETL\\Material Master": 1320,
+            "bp_Quantum\\Data and Analytics\\ETL\\Procurement": 21,
+            "bp_Quantum\\Data and Analytics\\Reporting and Analytics\\Asset Management (R and A)": 89,
+            "bp_Quantum\\Data and Analytics\\Reporting and Analytics\\Finance (R and A)": 90,
+            "bp_Quantum\\Technical\\Dev and Integration\\Asset Management": 1185,
+            "bp_Quantum\\Data and Analytics\\Reporting and Analytics\\Procurement (R and A)": 1184,
+            "bp_Quantum\\Technical\\Dev and Integration\\Finance": 1186,
+            "bp_Quantum\\Technical\\Dev and Integration\\Integration": 1187,
+            "bp_Quantum\\Technical\\Dev and Integration\\Procurement": 1188,
+            "bp_Quantum\\Technical\\Testing": 1189,
+            "bp_Quantum\\Technical\\Cutover and Release Management": 1193,
+            "bp_Quantum\\Technical\\Architecture": 1195,
+            "bp_Quantum\\Technical\\Digital Security and Compliance\\Asset Management": 1194,
+            "bp_Quantum\\Technical\\Digital Security and Compliance\\Finance": 1211,
+            "bp_Quantum\\Technical\\Digital Security and Compliance\\Procurement": 1212,
+            "bp_Quantum\\Technical\\Digital Security and Compliance\\MDG": 1213,
+            "bp_Quantum\\Technical\\Digital Security and Compliance\\Cross - Entity": 1214,
+            "bp_Quantum\\Technical\\Identity and Access Management\\Asset Management": 1215,
+            "bp_Quantum\\Technical\\Identity and Access Management\\Finance": 1216,
+            "bp_Quantum\\Technical\\Identity and Access Management\\Procurement": 1217,
+            "bp_Quantum\\Technical\\Identity and Access Management\\MDG": 1218,
+            "bp_Quantum\\Technical\\Identity and Access Management\\Cross - Entity": 1219,
+            "bp_Quantum\\Technical\\Platforms\\BW4": 1220,
+            "bp_Quantum\\Technical\\Platforms\\C and P": 1221,
+            "bp_Quantum\\Technical\\Platforms\\CB": 1222,
+            "bp_Quantum\\Technical\\Platforms\\CFIN or Core": 1223,
+            "bp_Quantum\\Technical\\Platforms\\MDG": 1224,
+            "bp_Quantum\\Technical\\Platforms\\P and O": 1225,
+            "bp_Quantum\\Process\\Finance\\Finance - ARAPINTERCO Squad": 1314,
+            "bp_Quantum\\Data and Analytics\\ETL\\Site Castellon": 1332,
+            "bp_Quantum\\Data and Analytics\\ETL\\Site Kwinana": 1334,
+            "bp_Quantum\\Data and Analytics\\ETL\\Site Whiting": 1335,
+            "bp_Quantum\\Data and Analytics\\ETL\\Site Global": 1348,
+            "bp_Quantum\\Data and Analytics\\ETL\\Data office": 1349,
+            "bp_Quantum\\Technical\\Platforms\\Shared\\BTP or SaaS": 1354,
+            "bp_Quantum\\Technical\\Platforms\\Shared\\GRC": 1355,
+            "bp_Quantum\\Technical\\Platforms\\Shared\\OpenText": 1356,
+            "bp_Quantum\\Technical\\Platforms\\Shared\\TL or Architecture or GRC": 1357
+        };
+
+        const QTEST_TEAM_VALUE_TO_AREA_PATH = Object.fromEntries(
+            Object.entries(AREA_PATH_TO_QTEST_TEAM_VALUE).map(([label, value]) => [String(value), label])
+        );
+
         if (defectToUpdate) {
             await updateDefect(
                 defectToUpdate,
@@ -397,7 +477,8 @@
                 qtestResolvedReasonValue,
                 adoAssignedToIdentity,
                 qtestTargetDateValue,
-                qtestDiscussionValue
+                qtestDiscussionValue,
+                qtestAssignedToTeamValue
             );
         }
 
@@ -470,7 +551,8 @@
             resolvedReasonValue,
             assignedToUserId,
             targetDateValue,
-            discussionValue
+            discussionValue,
+            qtestAssignedToTeamValue
         ) 
             {
             const defectId = defectToUpdate.id;
@@ -608,6 +690,16 @@
                     qtestAssignedToUserId
                         ? `[Info] Added Assigned To userId '${qtestAssignedToUserId}' to qTest update payload.`
                         : `[Info] Clearing qTest Assigned To (Blank) in update payload.`
+                );
+            }
+
+            if (constants.DefectAssignedToTeamFieldID && qtestAssignedToTeamValue) {
+                requestBody.properties.push({
+                    field_id: constants.DefectAssignedToTeamFieldID,
+                    field_value: parseInt(assignedToTeamValue, 10),
+                });
+                console.log(
+                    `[Info] Added Assigned to Team '${assignedToTeamValue}' to qTest update payload.`
                 );
             }
 

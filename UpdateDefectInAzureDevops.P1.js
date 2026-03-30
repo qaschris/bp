@@ -13,6 +13,86 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const iteration = event.iteration !== undefined ? event.iteration : 1;
     console.log("[Info] Iteration:", iteration);
 
+    const DEFAULT_AREA_PATH = "bp_Quantum\\Technical\\Testing";
+    const DEFAULT_ASSIGNED_TO_TEAM_VALUE = 1189;
+
+    const AREA_PATH_TO_QTEST_TEAM_VALUE = {
+        "bp_Quantum\\Process\\Asset Management\\Squad 1 - Data": 1,
+        "bp_Quantum\\Process\\Asset Management\\AM - Work Mgmt Core": 2,
+        "bp_Quantum\\Process\\Finance\\Finance - Capex Squad": 3,
+        "bp_Quantum\\Process\\Finance\\Finance - CB Hub 2.0 Squad": 4,
+        "bp_Quantum\\Process\\Finance\\Finance - R2R Squad": 6,
+        "bp_Quantum\\Process\\Finance\\Finance - Tax Squad": 7,
+        "bp_Quantum\\Process\\Procurement\\Invoice to Pay": 8,
+        "bp_Quantum\\Process\\Procurement\\Quality and Logistics": 9,
+        "bp_Quantum\\Process\\Procurement\\Services Procurement": 10,
+        "bp_Quantum\\Process\\Procurement\\Materials Procurement": 11,
+        "bp_Quantum\\Process\\Procurement\\Source to Contract": 12,
+        "bp_Quantum\\Process\\Procurement\\Materials and Inventory": 13,
+        "bp_Quantum\\Process\\MDG\\Asset Management": 14,
+        "bp_Quantum\\Process\\MDG\\Procurement": 15,
+        "bp_Quantum\\Process\\MDG\\Finance": 16,
+        "bp_Quantum\\Process\\MDG\\Material": 17,
+        "bp_Quantum\\Data and Analytics\\ETL\\Asset Management": 18,
+        "bp_Quantum\\Data and Analytics\\ETL\\Customer Management": 19,
+        "bp_Quantum\\Data and Analytics\\ETL\\Finance": 20,
+        "bp_Quantum\\Data and Analytics\\ETL\\Material Master": 1320,
+        "bp_Quantum\\Data and Analytics\\ETL\\Procurement": 21,
+        "bp_Quantum\\Data and Analytics\\Reporting and Analytics\\Asset Management (R and A)": 89,
+        "bp_Quantum\\Data and Analytics\\Reporting and Analytics\\Finance (R and A)": 90,
+        "bp_Quantum\\Technical\\Dev and Integration\\Asset Management": 1185,
+        "bp_Quantum\\Data and Analytics\\Reporting and Analytics\\Procurement (R and A)": 1184,
+        "bp_Quantum\\Technical\\Dev and Integration\\Finance": 1186,
+        "bp_Quantum\\Technical\\Dev and Integration\\Integration": 1187,
+        "bp_Quantum\\Technical\\Dev and Integration\\Procurement": 1188,
+        "bp_Quantum\\Technical\\Testing": 1189,
+        "bp_Quantum\\Technical\\Cutover and Release Management": 1193,
+        "bp_Quantum\\Technical\\Architecture": 1195,
+        "bp_Quantum\\Technical\\Digital Security and Compliance\\Asset Management": 1194,
+        "bp_Quantum\\Technical\\Digital Security and Compliance\\Finance": 1211,
+        "bp_Quantum\\Technical\\Digital Security and Compliance\\Procurement": 1212,
+        "bp_Quantum\\Technical\\Digital Security and Compliance\\MDG": 1213,
+        "bp_Quantum\\Technical\\Digital Security and Compliance\\Cross - Entity": 1214,
+        "bp_Quantum\\Technical\\Identity and Access Management\\Asset Management": 1215,
+        "bp_Quantum\\Technical\\Identity and Access Management\\Finance": 1216,
+        "bp_Quantum\\Technical\\Identity and Access Management\\Procurement": 1217,
+        "bp_Quantum\\Technical\\Identity and Access Management\\MDG": 1218,
+        "bp_Quantum\\Technical\\Identity and Access Management\\Cross - Entity": 1219,
+        "bp_Quantum\\Technical\\Platforms\\BW4": 1220,
+        "bp_Quantum\\Technical\\Platforms\\C and P": 1221,
+        "bp_Quantum\\Technical\\Platforms\\CB": 1222,
+        "bp_Quantum\\Technical\\Platforms\\CFIN or Core": 1223,
+        "bp_Quantum\\Technical\\Platforms\\MDG": 1224,
+        "bp_Quantum\\Technical\\Platforms\\P and O": 1225,
+        "bp_Quantum\\Process\\Finance\\Finance - ARAPINTERCO Squad": 1314,
+        "bp_Quantum\\Data and Analytics\\ETL\\Site Castellon": 1332,
+        "bp_Quantum\\Data and Analytics\\ETL\\Site Kwinana": 1334,
+        "bp_Quantum\\Data and Analytics\\ETL\\Site Whiting": 1335,
+        "bp_Quantum\\Data and Analytics\\ETL\\Site Global": 1348,
+        "bp_Quantum\\Data and Analytics\\ETL\\Data office": 1349,
+        "bp_Quantum\\Technical\\Platforms\\Shared\\BTP or SaaS": 1354,
+        "bp_Quantum\\Technical\\Platforms\\Shared\\GRC": 1355,
+        "bp_Quantum\\Technical\\Platforms\\Shared\\OpenText": 1356,
+        "bp_Quantum\\Technical\\Platforms\\Shared\\TL or Architecture or GRC": 1357
+    };
+
+    const QTEST_TEAM_VALUE_TO_AREA_PATH = Object.fromEntries(
+        Object.entries(AREA_PATH_TO_QTEST_TEAM_VALUE).map(([label, value]) => [String(value), label])
+    );
+
+    function normalizeAreaPathLabel(value) {
+        return typeof value === "string" ? value.trim() : "";
+    }
+
+    function mapAreaPathToQtestTeamValue(areaPath) {
+        const label = normalizeAreaPathLabel(areaPath);
+        return AREA_PATH_TO_QTEST_TEAM_VALUE[label] || DEFAULT_ASSIGNED_TO_TEAM_VALUE;
+    }
+
+    function mapQtestTeamValueToAreaPath(valueId) {
+        return QTEST_TEAM_VALUE_TO_AREA_PATH[String(valueId)] || DEFAULT_AREA_PATH;
+    }
+
     const defectId = event.defect ?.id || event.entityId;
     const projectId = event.defect ?.project_id || event.projectId;
 
@@ -84,6 +164,9 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const sourceTeamProp = getPropById(constants.DefectSourceTeamFieldID);
     const siteNameProp = getPropById(constants.DefectSiteNameFieldID);
     const assignedToProp = getPropById(constants.DefectAssignedToFieldID);
+    const assignedToTeamProp = getPropById(constants.DefectAssignedToTeamFieldID);
+    const targetDateProp = getPropById(constants.DefectTargetDateFieldID);
+    const targetDate = norm(firstNonEmpty(targetDateProp?.field_value));
 
     const appLabel = norm(firstNonEmpty(applicationProp ?.field_value_name));
     const srcLabel = norm(firstNonEmpty(sourceTeamProp ?.field_value_name));
@@ -113,6 +196,19 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
       }
     }
 
+    const assignedToTeamLabel = norm(
+        firstNonEmpty(
+            assignedToTeamProp?.field_value_name,
+            mapQtestTeamValueToAreaPath(assignedToTeamProp?.field_value)
+        )
+    );
+    
+    let isoDate;
+    if (targetDate) {
+      const d = new Date(targetDate);
+      if (!isNaN(d.getTime())) isoDate = d.toISOString().replace(".000Z", "+00:00");
+    }
+
     console.log("[Info] Assigned To Username:", userName);
     console.log("[Info] Assigned To Email:", userEmail);
 
@@ -130,8 +226,22 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const curApp = norm(constants.AzDoApplicationFieldRef ? cur[constants.AzDoApplicationFieldRef] : "");
     const curSrc = norm(constants.AzDoSourceTeamFieldRef ? cur[constants.AzDoSourceTeamFieldRef] : "");
     const curSite = norm(constants.AzDoSiteNameFieldRef ? cur[constants.AzDoSiteNameFieldRef] : "");
+    const curAreaPath = norm(cur[constants.AzDoAreaPathFieldRef || "System.AreaPath"]);
     const curAssignedToRaw = cur[constants.AzDoAssignedToFieldRef];
     const curAssignedTo = norm(extractAdoIdentityEmail(curAssignedToRaw));
+    const curTargetDateRaw = cur[constants.AzDoTargetDateFieldRef];
+
+    // ---- Helper: normalize dates for comparison (YYYY-MM-DD) ----
+    const normalizeDate = (d) => {
+      if (!d) return "";
+      const dt = new Date(d);
+      return isNaN(dt.getTime()) ? "" : dt.toISOString().split("T")[0];
+    };
+    const curTargetDate = normalizeDate(curTargetDateRaw);
+    const newTargetDate = normalizeDate(isoDate);
+
+    console.log("curTargetDate",curTargetDate);
+    console.log("newTargetDate",newTargetDate,isoDate);
 
     // ---- Build patch ----
     const patchData = [];
@@ -150,6 +260,18 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
       console.log("[Info] Updating SubEntity:", { from: curSite || "(empty)", to: siteLabel });
       patchData.push({ op: "add", path: `/fields/${constants.AzDoSiteNameFieldRef}`, value: siteLabel });
     }
+
+    if (assignedToTeamLabel && curAreaPath !== assignedToTeamLabel) {
+      console.log("[Info] Updating AreaPath from qTest Assigned to Team:", {
+        from: curAreaPath || "(empty)",
+        to: assignedToTeamLabel
+      });
+      patchData.push({
+        op: "add",
+        path: `/fields/${constants.AzDoAreaPathFieldRef || "System.AreaPath"}`,
+        value: assignedToTeamLabel
+      });
+    }
     // ---- Assigned To (qTest -> ADO) ----
     // Requirement: match users by email; if missing/unresolved, ADO should be Unassigned.
     if (constants.AzDoAssignedToFieldRef) {
@@ -164,6 +286,12 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         console.log("[Info] Clearing AssignedTo (ADO Unassigned):", { from: curAssignedTo });
         patchData.push({ op: "remove", path: `/fields/${constants.AzDoAssignedToFieldRef}` });
       }
+    }
+
+    // ---- Target Date ----
+    if (constants.AzDoTargetDateFieldRef && isoDate && curTargetDate !== isoDate) {
+      console.log("[Info] Updating TargetDate:", { from: curTargetDate || "(empty)", to: isoDate });
+      patchData.push({ op: "add", path: `/fields/${constants.AzDoTargetDateFieldRef}`, value: isoDate });
     }
 
     const backlink = defect.web_url || qTestDefectUrl;

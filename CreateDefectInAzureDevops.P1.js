@@ -20,6 +20,73 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         return;
     }
 
+    const DEFAULT_AREA_PATH = "bp_Quantum\\Technical\\Testing";
+    const DEFAULT_ASSIGNED_TO_TEAM_VALUE = 1189;
+
+    const AREA_PATH_TO_QTEST_TEAM_VALUE = {
+        "bp_Quantum\\Process\\Asset Management\\Squad 1 - Data": 1,
+        "bp_Quantum\\Process\\Asset Management\\AM - Work Mgmt Core": 2,
+        "bp_Quantum\\Process\\Finance\\Finance - Capex Squad": 3,
+        "bp_Quantum\\Process\\Finance\\Finance - CB Hub 2.0 Squad": 4,
+        "bp_Quantum\\Process\\Finance\\Finance - R2R Squad": 6,
+        "bp_Quantum\\Process\\Finance\\Finance - Tax Squad": 7,
+        "bp_Quantum\\Process\\Procurement\\Invoice to Pay": 8,
+        "bp_Quantum\\Process\\Procurement\\Quality and Logistics": 9,
+        "bp_Quantum\\Process\\Procurement\\Services Procurement": 10,
+        "bp_Quantum\\Process\\Procurement\\Materials Procurement": 11,
+        "bp_Quantum\\Process\\Procurement\\Source to Contract": 12,
+        "bp_Quantum\\Process\\Procurement\\Materials and Inventory": 13,
+        "bp_Quantum\\Process\\MDG\\Asset Management": 14,
+        "bp_Quantum\\Process\\MDG\\Procurement": 15,
+        "bp_Quantum\\Process\\MDG\\Finance": 16,
+        "bp_Quantum\\Process\\MDG\\Material": 17,
+        "bp_Quantum\\Data and Analytics\\ETL\\Asset Management": 18,
+        "bp_Quantum\\Data and Analytics\\ETL\\Customer Management": 19,
+        "bp_Quantum\\Data and Analytics\\ETL\\Finance": 20,
+        "bp_Quantum\\Data and Analytics\\ETL\\Material Master": 1320,
+        "bp_Quantum\\Data and Analytics\\ETL\\Procurement": 21,
+        "bp_Quantum\\Data and Analytics\\Reporting and Analytics\\Asset Management (R and A)": 89,
+        "bp_Quantum\\Data and Analytics\\Reporting and Analytics\\Finance (R and A)": 90,
+        "bp_Quantum\\Technical\\Dev and Integration\\Asset Management": 1185,
+        "bp_Quantum\\Data and Analytics\\Reporting and Analytics\\Procurement (R and A)": 1184,
+        "bp_Quantum\\Technical\\Dev and Integration\\Finance": 1186,
+        "bp_Quantum\\Technical\\Dev and Integration\\Integration": 1187,
+        "bp_Quantum\\Technical\\Dev and Integration\\Procurement": 1188,
+        "bp_Quantum\\Technical\\Testing": 1189,
+        "bp_Quantum\\Technical\\Cutover and Release Management": 1193,
+        "bp_Quantum\\Technical\\Architecture": 1195,
+        "bp_Quantum\\Technical\\Digital Security and Compliance\\Asset Management": 1194,
+        "bp_Quantum\\Technical\\Digital Security and Compliance\\Finance": 1211,
+        "bp_Quantum\\Technical\\Digital Security and Compliance\\Procurement": 1212,
+        "bp_Quantum\\Technical\\Digital Security and Compliance\\MDG": 1213,
+        "bp_Quantum\\Technical\\Digital Security and Compliance\\Cross - Entity": 1214,
+        "bp_Quantum\\Technical\\Identity and Access Management\\Asset Management": 1215,
+        "bp_Quantum\\Technical\\Identity and Access Management\\Finance": 1216,
+        "bp_Quantum\\Technical\\Identity and Access Management\\Procurement": 1217,
+        "bp_Quantum\\Technical\\Identity and Access Management\\MDG": 1218,
+        "bp_Quantum\\Technical\\Identity and Access Management\\Cross - Entity": 1219,
+        "bp_Quantum\\Technical\\Platforms\\BW4": 1220,
+        "bp_Quantum\\Technical\\Platforms\\C and P": 1221,
+        "bp_Quantum\\Technical\\Platforms\\CB": 1222,
+        "bp_Quantum\\Technical\\Platforms\\CFIN or Core": 1223,
+        "bp_Quantum\\Technical\\Platforms\\MDG": 1224,
+        "bp_Quantum\\Technical\\Platforms\\P and O": 1225,
+        "bp_Quantum\\Process\\Finance\\Finance - ARAPINTERCO Squad": 1314,
+        "bp_Quantum\\Data and Analytics\\ETL\\Site Castellon": 1332,
+        "bp_Quantum\\Data and Analytics\\ETL\\Site Kwinana": 1334,
+        "bp_Quantum\\Data and Analytics\\ETL\\Site Whiting": 1335,
+        "bp_Quantum\\Data and Analytics\\ETL\\Site Global": 1348,
+        "bp_Quantum\\Data and Analytics\\ETL\\Data office": 1349,
+        "bp_Quantum\\Technical\\Platforms\\Shared\\BTP or SaaS": 1354,
+        "bp_Quantum\\Technical\\Platforms\\Shared\\GRC": 1355,
+        "bp_Quantum\\Technical\\Platforms\\Shared\\OpenText": 1356,
+        "bp_Quantum\\Technical\\Platforms\\Shared\\TL or Architecture or GRC": 1357
+    };
+
+    const QTEST_TEAM_VALUE_TO_AREA_PATH = Object.fromEntries(
+        Object.entries(AREA_PATH_TO_QTEST_TEAM_VALUE).map(([label, value]) => [String(value), label])
+    );
+
     const defectDetails = await getDefectDetailsByIdWithRetry(defectId);
     if (!defectDetails) return;
 
@@ -36,6 +103,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         defectDetails.createdBy,
         defectDetails.externalReference,
         defectDetails.assignedToIdentity,
+        defectDetails.assignedToTeamLabel,
         defectDetails.targetDate
     );
 
@@ -67,6 +135,19 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         }
 
         return prop;
+    }
+
+    function normalizeAreaPathLabel(value) {
+        return typeof value === "string" ? value.trim() : "";
+    }
+
+    function mapAreaPathToQtestTeamValue(areaPath) {
+        const label = normalizeAreaPathLabel(areaPath);
+        return AREA_PATH_TO_QTEST_TEAM_VALUE[label] || DEFAULT_ASSIGNED_TO_TEAM_VALUE;
+    }
+
+    function mapQtestTeamValueToAreaPath(valueId) {
+        return QTEST_TEAM_VALUE_TO_AREA_PATH[String(valueId)] || DEFAULT_AREA_PATH;
     }
 
     async function getDefectDetailsByIdWithRetry(defectId) {
@@ -137,6 +218,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         const assignedToField = constants.DefectAssignedToFieldID ? getFieldById(defect, constants.DefectAssignedToFieldID) : null; // Assigned To (user id)
         const targetDateField = getFieldById(defect, constants.DefectTargetDateFieldID);
         const targetDate = targetDateField ? targetDateField.field_value : null;
+        const assignedToTeamField = constants.DefectAssignedToTeamFieldID ? getFieldById(defect, constants.DefectAssignedToTeamFieldID) : null;
         console.log(`[Info] Defect Target Date: ${targetDate}`);
         if (!summaryField || !descriptionField || !severityField) {
             console.error("[Error] Fields not found, exiting.");
@@ -185,7 +267,38 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         }
         console.log(`[Info] Defect Assigned To Identity: ${assignedToIdentity}`);
 
-        return { summary, description, link, severity, priority, defectType, status, affectedRelease, createdBy, externalReference, assignedToIdentity, targetDate };
+        let assignedToTeamLabel = DEFAULT_AREA_PATH;
+
+        if (assignedToTeamField) {
+            const rawTeamLabel = assignedToTeamField.field_value_name;
+            const rawTeamValue = assignedToTeamField.field_value;
+
+            assignedToTeamLabel =
+                normalizeAreaPathLabel(rawTeamLabel) ||
+                mapQtestTeamValueToAreaPath(rawTeamValue);
+
+            console.log(`[Info] Defect Assigned to Team Label: ${assignedToTeamLabel}`);
+        } else {
+            console.log(
+                `[Info] Defect Assigned to Team is blank in qTest. Defaulting ADO AreaPath to '${DEFAULT_AREA_PATH}'.`
+            );
+        }
+
+        return {
+            summary,
+            description,
+            link,
+            severity,
+            priority,
+            defectType,
+            status,
+            affectedRelease,
+            createdBy,
+            externalReference,
+            assignedToIdentity,
+            assignedToTeamLabel,
+            targetDate
+        };
     }
 
     async function getDefectById(defectId) {
@@ -330,21 +443,22 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         }
     }
 
-    async function createAzDoBug(
-        defectId,
-        name,
-        description,
-        link,
-        qtestSeverity,
-        qtestPriority,
-        qtestDefectType,
-        qtestStatus,
-        qtestAffectedRelease,
-        qtestCreatedBy,
-        qtestExternalReference,
-        qtestAssignedToIdentity,
-        qtestTargetDate
-    ) {
+        async function createAzDoBug(
+            defectId,
+            name,
+            description,
+            link,
+            qtestSeverity,
+            qtestPriority,
+            qtestDefectType,
+            qtestStatus,
+            qtestAffectedRelease,
+            qtestCreatedBy,
+            qtestExternalReference,
+            qtestAssignedToIdentity,
+            qtestAssignedToTeamLabel,
+            qtestTargetDate
+        ) {
         console.log(`[Info] Creating bug in Azure DevOps '${defectId}'`);
         const baseUrl = encodeIfNeeded(constants.AzDoProjectURL);
         const url = `${baseUrl}/_apis/wit/workitems/$Bug?api-version=6.0`;
@@ -402,7 +516,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             {
                 op: "add",
                 path: "/fields/System.AreaPath",
-                value: constants.AreaPath,        //  using the AreaPath constant from qTest
+                value: normalizeAreaPathLabel(qtestAssignedToTeamLabel) || DEFAULT_AREA_PATH,
             },
             {
                 op: "add",
