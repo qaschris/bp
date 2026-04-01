@@ -12,6 +12,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const platform = details.platform || "Unknown";
     const objectType = details.objectType || "Object";
     const objectId = details.objectId != null ? details.objectId : "Unknown";
+    const objectPid = details.objectPid ? ` Object PID: ${details.objectPid}.` : "";
     const fieldName = details.fieldName ? ` Field: ${details.fieldName}.` : "";
     const fieldValue = details.fieldValue != null && details.fieldValue !== ""
       ? ` Value: ${details.fieldValue}.`
@@ -19,7 +20,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const detail = details.detail || "Sync failed.";
 
     const message =
-      `Sync failed. Platform: ${platform}. Object Type: ${objectType}. Object ID: ${objectId}.${fieldName}${fieldValue} Detail: ${detail}`;
+      `Sync failed. Platform: ${platform}. Object Type: ${objectType}. Object ID: ${objectId}.${objectPid}${fieldName}${fieldValue} Detail: ${detail}`;
 
     console.error(`[Error] ${message}`);
     emitEvent('ChatOpsEvent', { message });
@@ -179,6 +180,8 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
     const summary = firstNonEmpty(getPropById(constants.DefectSummaryFieldID)?.field_value, defect.name);
     const description = firstNonEmpty(getPropById(constants.DefectDescriptionFieldID)?.field_value, defect.description);
+    const defectPid = defect?.pid || null;
+    console.log("[Info] qTest Defect PID:", defectPid);
 
     const wiRegex = /WI[-\s:]?(\d+)/i;
     let wiMatch = wiRegex.exec(summary) || wiRegex.exec(description || "");
@@ -245,12 +248,38 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
       }
     }
 
-    const assignedToTeamLabel = norm(
-      firstNonEmpty(
-        assignedToTeamProp?.field_value_name,
-        mapQtestTeamValueToAreaPath(assignedToTeamProp?.field_value)
-      )
-    );
+    let assignedToTeamLabel = DEFAULT_AREA_PATH;
+
+    if (assignedToTeamProp) {
+      const rawTeamLabel = norm(assignedToTeamProp.field_value_name);
+      const rawTeamValue = assignedToTeamProp.field_value;
+      const mappedAreaPath = QTEST_TEAM_VALUE_TO_AREA_PATH[String(rawTeamValue)];
+
+      if (mappedAreaPath) {
+        assignedToTeamLabel = mappedAreaPath;
+        console.log(`[Info] Resolved qTest Assigned to Team value '${rawTeamValue}' to ADO AreaPath '${assignedToTeamLabel}'`);
+      } else {
+        assignedToTeamLabel = DEFAULT_AREA_PATH;
+
+        const warningMessage =
+          `Assigned to Team value in qTest was not mapped. Raw label='${rawTeamLabel || ""}', raw value='${rawTeamValue || ""}'. Defaulted ADO AreaPath to '${DEFAULT_AREA_PATH}'.`;
+
+        console.log(`[Warn] ${warningMessage}`);
+        emitEvent('ChatOpsEvent', {
+          message: `Sync warning. Platform: ADO. Object Type: Defect. Object ID: ${workItemId}. Field: System.AreaPath. Value: ${rawTeamLabel || rawTeamValue || "(blank)"}. Detail: ${warningMessage}`
+        });
+      }
+    } else {
+      assignedToTeamLabel = DEFAULT_AREA_PATH;
+
+      const warningMessage =
+        `Assigned to Team was blank in qTest. Defaulted ADO AreaPath to '${DEFAULT_AREA_PATH}'.`;
+
+      console.log(`[Warn] ${warningMessage}`);
+      emitEvent('ChatOpsEvent', {
+        message: `Sync warning. Platform: ADO. Object Type: Defect. Object ID: ${workItemId}. Field: System.AreaPath. Value: (blank). Detail: ${warningMessage}`
+      });
+    }
 
     let isoDate;
     if (targetDate) {
@@ -378,6 +407,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         platform: "ADO",
         objectType: "Defect",
         objectId: workItemId,
+        objectPid: defectPid,
         detail: "Unable to update the Azure DevOps work item from qTest."
       });
     }
@@ -388,6 +418,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
       platform: "ADO",
       objectType: "Defect",
       objectId: event?.defect?.id || event?.entityId || "Unknown",
+      objectPid: defectPid,
       detail: "Unexpected error occurred during defect sync."
     });
   }

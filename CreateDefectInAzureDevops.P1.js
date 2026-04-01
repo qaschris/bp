@@ -91,6 +91,9 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         const platform = details.platform || "Unknown";
         const objectType = details.objectType || "Object";
         const objectId = details.objectId != null ? details.objectId : "Unknown";
+        const objectPid = details.objectPid != null && details.objectPid !== ""
+            ? ` Object PID: ${details.objectPid}.`
+            : "";
         const fieldName = details.fieldName ? ` Field: ${details.fieldName}.` : "";
         const fieldValue = details.fieldValue != null && details.fieldValue !== ""
             ? ` Value: ${details.fieldValue}.`
@@ -98,7 +101,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         const detail = details.detail || "Sync failed.";
 
         const message =
-            `Sync failed. Platform: ${platform}. Object Type: ${objectType}. Object ID: ${objectId}.${fieldName}${fieldValue} Detail: ${detail}`;
+            `Sync failed. Platform: ${platform}. Object Type: ${objectType}. Object ID: ${objectId}.${objectPid}${fieldName}${fieldValue} Detail: ${detail}`;
 
         console.error(`[Error] ${message}`);
         emitEvent('ChatOpsEvent', { message });
@@ -242,6 +245,8 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         const defect = await getDefectById(defectId);
         if (!defect) return null;
 
+        const defectPid = defect.pid || null;
+        console.log(`[Info] Defect PID: ${defectPid}`);
         const summaryField = getFieldById(defect, constants.DefectSummaryFieldID);
         const descriptionField = getFieldById(defect, constants.DefectDescriptionFieldID);
         const severityField = getFieldById(defect, constants.DefectSeverityFieldID);
@@ -272,6 +277,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
                 platform: "qTest",
                 objectType: "Defect",
                 objectId: defectId,
+                objectPid: defectPid,
                 fieldName: missingFieldLabel,
                 detail: "Required field data is missing."
             });
@@ -321,20 +327,49 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         console.log(`[Info] Defect Assigned To Identity: ${assignedToIdentity}`);
 
         let assignedToTeamLabel = DEFAULT_AREA_PATH;
+        let assignedToTeamWarning = null;
+
         if (assignedToTeamField) {
-            const rawTeamLabel = assignedToTeamField.field_value_name;
+            const rawTeamLabel = normalizeAreaPathLabel(assignedToTeamField.field_value_name);
             const rawTeamValue = assignedToTeamField.field_value;
+            const mappedAreaPath = QTEST_TEAM_VALUE_TO_AREA_PATH[String(rawTeamValue)];
 
-            assignedToTeamLabel =
-                normalizeAreaPathLabel(rawTeamLabel) ||
-                mapQtestTeamValueToAreaPath(rawTeamValue);
+            if (mappedAreaPath) {
+                assignedToTeamLabel = mappedAreaPath;
+                console.log(`[Info] Defect Assigned to Team resolved from qTest value '${rawTeamValue}' to ADO AreaPath '${assignedToTeamLabel}'`);
+            } else {
+                assignedToTeamLabel = DEFAULT_AREA_PATH;
+                assignedToTeamWarning =
+                    `Assigned to Team value in qTest was not mapped. Raw label='${rawTeamLabel || ""}', raw value='${rawTeamValue || ""}'. Defaulted ADO AreaPath to '${DEFAULT_AREA_PATH}'.`;
 
-            console.log(`[Info] Defect Assigned to Team Label: ${assignedToTeamLabel}`);
+                console.log(`[Warn] ${assignedToTeamWarning}`);
+                emitFriendlyFailure({
+                    platform: "ADO",
+                    objectType: "Defect",
+                    objectId: defectId,
+                    fieldName: "System.AreaPath",
+                    fieldValue: `${rawTeamLabel || rawTeamValue || "(blank)"}`,
+                    detail: assignedToTeamWarning
+                });
+            }
         } else {
-            console.log(`[Info] Defect Assigned to Team is blank in qTest. Defaulting ADO AreaPath to '${DEFAULT_AREA_PATH}'.`);
+            assignedToTeamLabel = DEFAULT_AREA_PATH;
+            assignedToTeamWarning =
+                `Assigned to Team was blank in qTest. Defaulted ADO AreaPath to '${DEFAULT_AREA_PATH}'.`;
+
+            console.log(`[Warn] ${assignedToTeamWarning}`);
+            emitFriendlyFailure({
+                platform: "ADO",
+                objectType: "Defect",
+                objectId: defectId,
+                fieldName: "System.AreaPath",
+                fieldValue: "(blank)",
+                detail: assignedToTeamWarning
+            });
         }
 
         return {
+            pid: defectPid,
             summary,
             description,
             link,
@@ -457,6 +492,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
     async function createAzDoBug(
         defectId,
+        defectPid,
         name,
         description,
         link,
@@ -495,6 +531,9 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             console.log(`[Info] Skipping Affected Release sync — either not set or value is 'P&O Release 1'`);
         }
 
+        const finalAreaPath = normalizeAreaPathLabel(qtestAssignedToTeamLabel) || DEFAULT_AREA_PATH;
+        console.log(`[Info] Final ADO AreaPath to send: ${finalAreaPath}`);
+
         const requestBody = [
             { op: "add", path: "/fields/System.Title", value: name },
             { op: "add", path: "/fields/Microsoft.VSTS.TCM.ReproSteps", value: description },
@@ -505,7 +544,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             {
                 op: "add",
                 path: "/fields/System.AreaPath",
-                value: normalizeAreaPathLabel(qtestAssignedToTeamLabel) || DEFAULT_AREA_PATH
+                value: finalAreaPath
             },
             {
                 op: "add",
@@ -611,6 +650,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
                 platform: "ADO",
                 objectType: "Defect",
                 objectId: defectId,
+                objectPid: defectPid,
                 detail: "Unable to create defect in Azure DevOps."
             });
 
@@ -716,6 +756,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
     const bug = await createAzDoBug(
         defectId,
+        defectDetails.pid,
         defectDetails.summary,
         defectDetails.description,
         defectDetails.link,
