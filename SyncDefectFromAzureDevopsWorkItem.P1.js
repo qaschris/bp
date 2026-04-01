@@ -656,7 +656,8 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         "Closed": 10881,
         "On Hold": 10883,
         "Rejected": 10853,
-        "Cancelled": 10853
+        "Cancelled": 10853,
+        "Triage": 11376
     };
 
     const qtestStatusValue = stateMap[adoState] || null;

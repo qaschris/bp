@@ -403,6 +403,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             case 10881: return "Closed";
             case 10883: return "On Hold";
             case 10853: return "Rejected";
+            case 11376: return "Triage";
             default: return "New";
         }
     }
@@ -418,6 +419,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             case 285: return "P&O_R1_DC2";
             case 286: return "P&O_R1_DC3";
             case 287: return "P&O_R1_UAT";
+            case 302: return "Unit Testing";
             default: return null;
         }
     }

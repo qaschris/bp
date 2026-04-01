@@ -9,9 +9,9 @@ const CONFIG = {
     ADO_BASE_URL: 'https://dev.azure.com/organization/project',
     QTEST_PROJECT_ID: 123456,
     PARENT_MODULE_ID: 12345678,
-    TEST_MODE: true,
-    TEST_REQUIREMENT_ID: 123456789,
-    DRY_RUN: true,
+    TEST_MODE: true,  // Set to true to process only a single requirement defined by TEST_REQUIREMENT_ID; false to process all requirements under PARENT_MODULE_ID
+    TEST_REQUIREMENT_ID: 123456789, // Only used if TEST_MODE is true; the ID of a single requirement to process for testing purposes
+    DRY_RUN: true, // Set to true to skip all write operations to qTest, allowing you to validate the script behavior without making any changes; false to allow updates to be made to qTest
     PAGE_SIZE: 100,
     LOG_DIRECTORY: './logs',
     REQUEST_TIMEOUT_MS: 60000,
