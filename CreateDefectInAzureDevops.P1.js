@@ -14,7 +14,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         return;
     }
 
-    const DEFAULT_AREA_PATH = "bp_Quantum\\Technical\\Testing";
+    const DEFAULT_AREA_PATH = constants.AreaPath;
     const DEFAULT_ASSIGNED_TO_TEAM_VALUE = 1189;
 
     const AREA_PATH_TO_QTEST_TEAM_VALUE = {

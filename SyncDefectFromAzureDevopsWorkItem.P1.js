@@ -3,7 +3,7 @@ const axios = require("axios");
 
 exports.handler = async function ({ event, constants, triggers }, context, callback) {
 
-    const DEFAULT_AREA_PATH = "bp_Quantum\\Technical\\Testing";
+    const DEFAULT_AREA_PATH = constants.AreaPath;
     const DEFAULT_ASSIGNED_TO_TEAM_VALUE = 1189;
 
     const AREA_PATH_TO_QTEST_TEAM_VALUE = {
@@ -647,7 +647,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         "New": 10001,
         "In Analysis": 10002,
         "Active": 10002,
-        "Triage": 10002,
         "In Resolution": 10004,
         "Awaiting Implementation": 10003,
         "Resolved": 10953,
