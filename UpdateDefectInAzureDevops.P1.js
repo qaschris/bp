@@ -115,7 +115,8 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
       "bp_Quantum\\Technical\\Platforms\\Shared\\BTP or SaaS": 1354,
       "bp_Quantum\\Technical\\Platforms\\Shared\\GRC": 1355,
       "bp_Quantum\\Technical\\Platforms\\Shared\\OpenText": 1356,
-      "bp_Quantum\\Technical\\Platforms\\Shared\\TL or Architecture or GRC": 1357
+      "bp_Quantum\\Technical\\Platforms\\Shared\\TL or Architecture or GRC": 1357,
+      "bp_Quantum\\Technical\\Tool Chain": 1363
     };
 
     const QTEST_TEAM_VALUE_TO_AREA_PATH = Object.fromEntries(
@@ -226,7 +227,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const assignedLabel = norm(firstNonEmpty(assignedToProp?.field_value));
     const assignedToLabel = norm(firstNonEmpty(assignedToProp?.field_value_name));
 
-    let userEmail = "";
     let userName = "";
 
     if (assignedLabel) {
@@ -240,7 +240,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
         const u = userResp?.data || {};
         const identity = (u.username || "").trim() || (u.ldap_username || "").trim() || (u.external_user_name || "").trim();
-        userEmail = (u.email || "").trim();
         userName = identity;
       } catch (e) {
         console.error("[Error] Failed to fetch qTest user details:", e.response?.data || e.message);
@@ -288,7 +287,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     }
 
     console.log("[Info] Assigned To Username:", userName);
-    console.log("[Info] Assigned To Email:", userEmail);
+    console.log("[Info] Assigned To Email:", userName);
     console.log("[Info] Assigned To Label:", assignedToLabel);
 
     let adoCurrent;
@@ -357,7 +356,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     }
 
     if (constants.AzDoAssignedToFieldRef) {
-      const desiredAssignedTo = norm(userEmail || userName);
+      const desiredAssignedTo = norm(userName);
 
       if (desiredAssignedTo) {
         if (curAssignedTo !== desiredAssignedTo) {

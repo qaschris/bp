@@ -74,7 +74,8 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         "bp_Quantum\\Technical\\Platforms\\Shared\\BTP or SaaS": 1354,
         "bp_Quantum\\Technical\\Platforms\\Shared\\GRC": 1355,
         "bp_Quantum\\Technical\\Platforms\\Shared\\OpenText": 1356,
-        "bp_Quantum\\Technical\\Platforms\\Shared\\TL or Architecture or GRC": 1357
+        "bp_Quantum\\Technical\\Platforms\\Shared\\TL or Architecture or GRC": 1357,
+        "bp_Quantum\\Technical\\Tool Chain": 1363
     };
 
     const QTEST_TEAM_VALUE_TO_AREA_PATH = Object.fromEntries(
@@ -328,6 +329,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
         let assignedToTeamLabel = DEFAULT_AREA_PATH;
         let assignedToTeamWarning = null;
+        let assignedToTeamWarningValue = "(blank)";
 
         if (assignedToTeamField) {
             const rawTeamLabel = normalizeAreaPathLabel(assignedToTeamField.field_value_name);
@@ -339,33 +341,19 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
                 console.log(`[Info] Defect Assigned to Team resolved from qTest value '${rawTeamValue}' to ADO AreaPath '${assignedToTeamLabel}'`);
             } else {
                 assignedToTeamLabel = DEFAULT_AREA_PATH;
+                assignedToTeamWarningValue = `${rawTeamLabel || rawTeamValue || "(blank)"}`;
                 assignedToTeamWarning =
                     `Assigned to Team value in qTest was not mapped. Raw label='${rawTeamLabel || ""}', raw value='${rawTeamValue || ""}'. Defaulted ADO AreaPath to '${DEFAULT_AREA_PATH}'.`;
 
                 console.log(`[Warn] ${assignedToTeamWarning}`);
-                emitFriendlyFailure({
-                    platform: "ADO",
-                    objectType: "Defect",
-                    objectId: defectId,
-                    fieldName: "System.AreaPath",
-                    fieldValue: `${rawTeamLabel || rawTeamValue || "(blank)"}`,
-                    detail: assignedToTeamWarning
-                });
             }
         } else {
             assignedToTeamLabel = DEFAULT_AREA_PATH;
+            assignedToTeamWarningValue = "(blank)";
             assignedToTeamWarning =
                 `Assigned to Team was blank in qTest. Defaulted ADO AreaPath to '${DEFAULT_AREA_PATH}'.`;
 
             console.log(`[Warn] ${assignedToTeamWarning}`);
-            emitFriendlyFailure({
-                platform: "ADO",
-                objectType: "Defect",
-                objectId: defectId,
-                fieldName: "System.AreaPath",
-                fieldValue: "(blank)",
-                detail: assignedToTeamWarning
-            });
         }
 
         return {
@@ -382,6 +370,8 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             externalReference,
             assignedToIdentity,
             assignedToTeamLabel,
+            assignedToTeamWarning,
+            assignedToTeamWarningValue,
             targetDate
         };
     }
@@ -753,6 +743,18 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
     const defectDetails = await getDefectDetailsByIdWithRetry(defectId);
     if (!defectDetails) return;
+
+    if (defectDetails.assignedToTeamWarning) {
+        emitFriendlyFailure({
+            platform: "ADO",
+            objectType: "Defect",
+            objectId: defectId,
+            objectPid: defectDetails.pid,
+            fieldName: "System.AreaPath",
+            fieldValue: defectDetails.assignedToTeamWarningValue,
+            detail: defectDetails.assignedToTeamWarning
+        });
+    }
 
     const bug = await createAzDoBug(
         defectId,

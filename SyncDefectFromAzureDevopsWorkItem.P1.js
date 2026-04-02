@@ -4,7 +4,7 @@ const axios = require("axios");
 exports.handler = async function ({ event, constants, triggers }, context, callback) {
 
     const DEFAULT_AREA_PATH = constants.AreaPath;
-    const DEFAULT_ASSIGNED_TO_TEAM_VALUE = 1189;
+    const DEFAULT_ASSIGNED_TO_TEAM_VALUE = 1363; // Default to "Tool Chain" team in qTest if no mapping found
 
     const AREA_PATH_TO_QTEST_TEAM_VALUE = {
         "bp_Quantum\\Process\\Asset Management\\Squad 1 - Data": 1,
@@ -63,7 +63,8 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         "bp_Quantum\\Technical\\Platforms\\Shared\\BTP or SaaS": 1354,
         "bp_Quantum\\Technical\\Platforms\\Shared\\GRC": 1355,
         "bp_Quantum\\Technical\\Platforms\\Shared\\OpenText": 1356,
-        "bp_Quantum\\Technical\\Platforms\\Shared\\TL or Architecture or GRC": 1357
+        "bp_Quantum\\Technical\\Platforms\\Shared\\TL or Architecture or GRC": 1357,
+        "bp_Quantum\\Technical\\Tool Chain": 1363
     };
 
     const QTEST_TEAM_VALUE_TO_AREA_PATH = Object.fromEntries(
@@ -145,7 +146,12 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
     function mapAreaPathToQtestTeamValue(areaPath) {
         const label = normalizeAreaPathLabel(areaPath);
-        return AREA_PATH_TO_QTEST_TEAM_VALUE[label] || DEFAULT_ASSIGNED_TO_TEAM_VALUE;
+        let mappedValue = AREA_PATH_TO_QTEST_TEAM_VALUE[label];
+        if (!AREA_PATH_TO_QTEST_TEAM_VALUE[label]) {
+            mappedValue = AREA_PATH_TO_QTEST_TEAM_VALUE[DEFAULT_AREA_PATH];
+            console.log(`[Info] Area Path '${label}' not found. Using default team value: '${mappedValue}' for default area path '${DEFAULT_AREA_PATH}'.`);
+        }
+        return mappedValue;
     }
 
     function mapQtestTeamValueToAreaPath(valueId) {
