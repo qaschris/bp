@@ -191,7 +191,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         return user?.id ?? null;
     }
 
-    async function resolveDefectFieldValue(fieldId, rawValue, fieldLabel) {
+    async function resolveDefectFieldValue(fieldId, rawValue, fieldLabel, defectContext = null, options = {}) {
         if (!fieldId || rawValue === undefined || rawValue === null || rawValue === "") {
             return null;
         }
@@ -199,14 +199,17 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         try {
             return await resolveFieldValue(fieldId, rawValue, "defects");
         } catch (error) {
-            emitFriendlyFailure({
-                platform: "qTest",
-                objectType: "Defect",
-                objectId: event?.resource?.workItemId || "Unknown",
-                fieldName: fieldLabel,
-                fieldValue: rawValue,
-                detail: error.message,
-            });
+            if (options.emitFailure !== false) {
+                emitFriendlyFailure({
+                    platform: "qTest",
+                    objectType: "Defect",
+                    objectId: defectContext?.id ?? event?.resource?.workItemId ?? "Unknown",
+                    objectPid: defectContext?.pid,
+                    fieldName: fieldLabel,
+                    fieldValue: rawValue,
+                    detail: error.message,
+                });
+            }
             throw error;
         }
     }
@@ -227,6 +230,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         const platform = details.platform || "Unknown";
         const objectType = details.objectType || "Object";
         const objectId = details.objectId != null ? details.objectId : "Unknown";
+        const objectPid = details.objectPid ? ` Object PID: ${details.objectPid}.` : "";
         const fieldName = details.fieldName ? ` Field: ${details.fieldName}.` : "";
         const fieldValue = details.fieldValue != null && details.fieldValue !== ""
             ? ` Value: ${details.fieldValue}.`
@@ -234,9 +238,27 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         const detail = details.detail || "Sync failed.";
 
         const message =
-            `Sync failed. Platform: ${platform}. Object Type: ${objectType}. Object ID: ${objectId}.${fieldName}${fieldValue} Detail: ${detail}`;
+            `Sync failed. Platform: ${platform}. Object Type: ${objectType}. Object ID: ${objectId}.${objectPid}${fieldName}${fieldValue} Detail: ${detail}`;
 
         console.error(`[Error] ${message}`);
+        emitEvent('ChatOpsEvent', { message });
+    }
+
+    function emitFriendlyWarning(details = {}) {
+        const platform = details.platform || "Unknown";
+        const objectType = details.objectType || "Object";
+        const objectId = details.objectId != null ? details.objectId : "Unknown";
+        const objectPid = details.objectPid ? ` Object PID: ${details.objectPid}.` : "";
+        const fieldName = details.fieldName ? ` Field: ${details.fieldName}.` : "";
+        const fieldValue = details.fieldValue != null && details.fieldValue !== ""
+            ? ` Value: ${details.fieldValue}.`
+            : "";
+        const detail = details.detail || "Warning.";
+
+        const message =
+            `Sync warning. Platform: ${platform}. Object Type: ${objectType}. Object ID: ${objectId}.${objectPid}${fieldName}${fieldValue} Detail: ${detail}`;
+
+        console.log(`[Warn] ${message}`);
         emitEvent('ChatOpsEvent', { message });
     }
 
@@ -288,38 +310,67 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         return mapping[status] || status;
     }
 
-    async function mapAreaPathToQtestTeamValue(areaPath) {
+    async function mapAreaPathToQtestTeamValue(areaPath, defectContext = null) {
         const label = normalizeAreaPathLabel(areaPath);
         if (label) {
             try {
-                return await resolveDefectFieldValue(
+                const resolvedValue = await resolveDefectFieldValue(
                     constants.DefectAssignedToTeamFieldID,
                     label,
-                    "Assigned to Team"
+                    "Assigned to Team",
+                    defectContext,
+                    { emitFailure: false }
                 );
+                return {
+                    value: resolvedValue,
+                    usedDefault: false,
+                };
             } catch (error) {
                 console.log(`[Warn] Area Path '${label}' could not be resolved in qTest. Attempting default area path '${DEFAULT_AREA_PATH}'.`);
             }
         }
 
         if (!DEFAULT_AREA_PATH) {
-            return DEFAULT_ASSIGNED_TO_TEAM_VALUE;
+            return {
+                value: DEFAULT_ASSIGNED_TO_TEAM_VALUE,
+                usedDefault: true,
+                warningValue: label || "(blank)",
+                warningDetail:
+                    `ADO AreaPath '${label || "(blank)"}' could not be resolved to qTest Assigned to Team. ` +
+                    `Defaulted to configured team value '${DEFAULT_ASSIGNED_TO_TEAM_VALUE}'.`,
+            };
         }
 
         try {
             const fallbackValue = await resolveDefectFieldValue(
                 constants.DefectAssignedToTeamFieldID,
                 DEFAULT_AREA_PATH,
-                "Assigned to Team"
+                "Assigned to Team",
+                defectContext,
+                { emitFailure: false }
             );
             console.log(`[Info] Using default team value '${fallbackValue}' for default area path '${DEFAULT_AREA_PATH}'.`);
-            return fallbackValue;
+            return {
+                value: fallbackValue,
+                usedDefault: true,
+                warningValue: label || "(blank)",
+                warningDetail:
+                    `ADO AreaPath '${label || "(blank)"}' could not be resolved to qTest Assigned to Team. ` +
+                    `Defaulted to area path '${DEFAULT_AREA_PATH}'.`,
+            };
         } catch (error) {
             console.log(
                 `[Warn] Default area path '${DEFAULT_AREA_PATH}' could not be resolved dynamically. ` +
                 `Falling back to configured default team value '${DEFAULT_ASSIGNED_TO_TEAM_VALUE}'.`
             );
-            return DEFAULT_ASSIGNED_TO_TEAM_VALUE;
+            return {
+                value: DEFAULT_ASSIGNED_TO_TEAM_VALUE,
+                usedDefault: true,
+                warningValue: label || "(blank)",
+                warningDetail:
+                    `ADO AreaPath '${label || "(blank)"}' could not be resolved to qTest Assigned to Team. ` +
+                    `Default area path '${DEFAULT_AREA_PATH}' could not be resolved dynamically, so the configured team value '${DEFAULT_ASSIGNED_TO_TEAM_VALUE}' was used.`,
+            };
         }
     }
 
@@ -353,7 +404,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         return s || null;
     }
 
-    async function getAdoComments(workItemId) {
+    async function getAdoComments(workItemId, defectContext = null) {
         const url = `${constants.AzDoProjectURL}/_apis/wit/workitems/${workItemId}/comments?api-version=7.0-preview.3`;
         const encodedToken = Buffer.from(`:${constants.AZDO_TOKEN}`).toString("base64");
 
@@ -368,7 +419,8 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             emitFriendlyFailure({
                 platform: "ADO",
                 objectType: "Defect",
-                objectId: workItemId,
+                objectId: defectContext?.id ?? workItemId,
+                objectPid: defectContext?.pid,
                 fieldName: "Discussion",
                 detail: "Unable to retrieve comments from Azure DevOps."
             });
@@ -614,6 +666,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
                 platform: "qTest",
                 objectType: "Defect",
                 objectId: defectId,
+                objectPid: defectPid,
                 detail: "Unable to update the qTest defect from Azure DevOps."
             });
         }
@@ -701,22 +754,32 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const defectDescription = buildDefectDescription(event);
     const defectSummary = buildDefectSummary(namePrefix, event);
     const fields = getFields(event);
+    const defectContext = defectToUpdate
+        ? { id: defectToUpdate.id, pid: defectToUpdate.pid }
+        : null;
 
     const adoAreaPath = fields[constants.AzDoAreaPathFieldRef || "System.AreaPath"] || "";
     console.log(`[Info] ADO AreaPath value: '${adoAreaPath}'`);
 
-    const qtestAssignedToTeamValue = await mapAreaPathToQtestTeamValue(adoAreaPath);
+    const qtestAssignedToTeamResult = await mapAreaPathToQtestTeamValue(adoAreaPath, defectContext);
+    const qtestAssignedToTeamValue = qtestAssignedToTeamResult.value;
     console.log(
         `[Info] Mapped ADO AreaPath '${adoAreaPath || "(blank)"}' to qTest Assigned to Team value '${qtestAssignedToTeamValue}'`
     );
 
-    if (!AREA_PATH_TO_QTEST_TEAM_VALUE[normalizeAreaPathLabel(adoAreaPath)]) {
-        console.log(
-            `[Warn] ADO AreaPath '${adoAreaPath || "(blank)"}' not found in qTest team mapping. Defaulting to '${DEFAULT_AREA_PATH}' (${DEFAULT_ASSIGNED_TO_TEAM_VALUE}).`
-        );
+    if (qtestAssignedToTeamResult.usedDefault) {
+        emitFriendlyWarning({
+            platform: "qTest",
+            objectType: "Defect",
+            objectId: defectContext?.id ?? workItemId,
+            objectPid: defectContext?.pid,
+            fieldName: "Assigned to Team",
+            fieldValue: qtestAssignedToTeamResult.warningValue,
+            detail: qtestAssignedToTeamResult.warningDetail,
+        });
     }
 
-    let adoComments = await getAdoComments(workItemId);
+    let adoComments = await getAdoComments(workItemId, defectContext);
 
     if (constants.SyncUserRegex) {
         const regex = new RegExp(constants.SyncUserRegex, "i");
@@ -757,12 +820,13 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     }
 
     const adoSeverity = fields["Microsoft.VSTS.Common.Severity"];
-    console.log(`[Info] ADO Severity value: '${adoSeverity}'`);
+        console.log(`[Info] ADO Severity value: '${adoSeverity}'`);
 
     const qtestSeverityValue = await resolveDefectFieldValue(
         constants.DefectSeverityFieldID,
         adoSeverity,
-        "Severity"
+        "Severity",
+        defectContext
     );
     console.log(`[Info] Mapped ADO Severity '${adoSeverity}' to qTest Severity`);
 
@@ -772,7 +836,8 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const qtestPriorityValue = await resolveDefectFieldValue(
         constants.DefectPriorityFieldID,
         adoPriority,
-        "Priority"
+        "Priority",
+        defectContext
     );
     console.log(`[Info] Mapped ADO Priority '${adoPriority}' to qTest Priority value '${qtestPriorityValue}'`);
 
@@ -782,7 +847,8 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const qtestDefectTypeValue = await resolveDefectFieldValue(
         constants.DefectTypeFieldID,
         adoDefectType,
-        "Defect Type"
+        "Defect Type",
+        defectContext
     );
     console.log(`[Info] Mapped ADO Defect Type '${adoDefectType}' to qTest Defect Type value '${qtestDefectTypeValue}'`);
 
@@ -793,7 +859,8 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const qtestStatusValue = await resolveDefectFieldValue(
         constants.DefectStatusFieldID,
         qtestStatusLabel,
-        "Status"
+        "Status",
+        defectContext
     );
     console.log(`[Info] Mapped ADO State '${adoState}' to qTest Status label '${qtestStatusLabel}' and qTest Status value '${qtestStatusValue}'`);
     if (!qtestStatusValue) {
@@ -841,7 +908,8 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const qtestResolvedReasonValue = await resolveDefectFieldValue(
         constants.DefectResolvedReasonFieldID,
         adoResolvedReason,
-        "Resolved Reason"
+        "Resolved Reason",
+        defectContext
     );
     console.log(`[Info] Mapped ADO Resolved Reason '${adoResolvedReason}' → qTest value '${qtestResolvedReasonValue}'`);
 
