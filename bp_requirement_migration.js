@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
+const { resolveFieldValue } = require('./qtestApiUtils');
 
 const CONFIG = {
     QTEST_TOKEN: 'REPLACE_ME',
@@ -31,42 +32,13 @@ const CONFIG = {
         REQUIREMENT_ACCEPTANCE_CRITERIA: 0, // optional; leave 0 to keep acceptance criteria embedded in description only
     },
 
-    VALUE_MAPPINGS: {
-        COMPLEXITY: {
-            '1 - Very High': 941,
-            '2 - High': 942,
-            '3 - Medium': 943,
-            '4 - Low': 944,
-            '5 - Very Low': 945,
-        },
-        WORK_ITEM_TYPE: {
-            Requirement: 1358,
-        },
-        PRIORITY: {
-            1: 11355,
-            2: 11356,
-            3: 11357,
-            4: 11358,
-        },
-        REQUIREMENT_CATEGORY: {
-            'AI Deliverable': 11333,
-            'Business Risk': 11334,
-            'Business Value': 11335,
-            Control: 11336,
-            Demo: 11337,
-            Legal: 11338,
-            'Regulatory or Business Critical': 11339,
-            Security: 11340,
-            Statutory: 11341,
-            Tax: 11342,
-        },
-    },
 };
 
 const STATE = {
     logFile: null,
     errorFile: null,
     moduleChildrenCache: {},
+    qtestMetadataCache: {},
     counters: {
         discovered: 0,
         processed: 0,
@@ -211,6 +183,33 @@ function adoHeaders() {
     };
 }
 
+async function resolveRequirementFieldValue(fieldId, rawValue, fieldLabel) {
+    if (!fieldId || rawValue === undefined || rawValue === null || rawValue === '') {
+        return null;
+    }
+
+    try {
+        return await resolveFieldValue({
+            baseUrl: CONFIG.QTEST_BASE_URL,
+            projectId: CONFIG.QTEST_PROJECT_ID,
+            objectType: 'requirements',
+            fieldId,
+            rawValue,
+            headers: qTestHeaders(),
+            cache: STATE.qtestMetadataCache,
+            logger: message => log('INFO', message),
+        });
+    } catch (error) {
+        logError(`Unable to resolve qTest option value for '${fieldLabel}'.`, {
+            fieldId,
+            fieldLabel,
+            rawValue,
+            error: error.message,
+        });
+        throw error;
+    }
+}
+
 async function qtestGet(url, params) {
     return doRequest({ method: 'GET', url, headers: qTestHeaders(), params });
 }
@@ -329,7 +328,7 @@ function extractWorkItemIdFromRequirement(requirement) {
     return match ? Number(match[1]) : null;
 }
 
-function getMappedValues(workItem) {
+async function getMappedValues(workItem) {
     const fields = extractFieldsFromAdoWorkItem(workItem);
     const complexity = fields['Custom.Complexity'] || null;
     const workItemType = fields['System.WorkItemType'] || null;
@@ -337,10 +336,26 @@ function getMappedValues(workItem) {
     const category = fields['Custom.RequirementCategory'] || null;
 
     return {
-        qtestComplexityValue: CONFIG.VALUE_MAPPINGS.COMPLEXITY[complexity] || null,
-        qtestWorkItemTypeValue: CONFIG.VALUE_MAPPINGS.WORK_ITEM_TYPE[workItemType] || null,
-        qtestPriorityValue: CONFIG.VALUE_MAPPINGS.PRIORITY[priority] || null,
-        qtestTypeValue: CONFIG.VALUE_MAPPINGS.REQUIREMENT_CATEGORY[category] || null,
+        qtestComplexityValue: await resolveRequirementFieldValue(
+            CONFIG.FIELD_IDS.REQUIREMENT_COMPLEXITY,
+            complexity,
+            'Complexity'
+        ),
+        qtestWorkItemTypeValue: await resolveRequirementFieldValue(
+            CONFIG.FIELD_IDS.REQUIREMENT_WORK_ITEM_TYPE,
+            workItemType,
+            'Work Item Type'
+        ),
+        qtestPriorityValue: await resolveRequirementFieldValue(
+            CONFIG.FIELD_IDS.REQUIREMENT_PRIORITY,
+            priority,
+            'Priority'
+        ),
+        qtestTypeValue: await resolveRequirementFieldValue(
+            CONFIG.FIELD_IDS.REQUIREMENT_TYPE,
+            category,
+            'Requirement Category'
+        ),
     };
 }
 
@@ -601,7 +616,7 @@ async function processRequirement(requirement) {
         const fields = extractFieldsFromAdoWorkItem(workItem);
         const description = buildRequirementDescription(workItem);
         const name = buildRequirementName(workItemId, workItem);
-        const mappedValues = getMappedValues(workItem);
+        const mappedValues = await getMappedValues(workItem);
         const areaPath = fields['System.AreaPath'] || '';
         const iterationPath = fields['System.IterationPath'] || null;
         const applicationName = fields['Custom.ApplicationName'] || null;

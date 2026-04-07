@@ -2,6 +2,7 @@ const { Webhooks } = require('@qasymphony/pulse-sdk');
 const axios = require("axios");
 
 exports.handler = async function ({ event, constants, triggers }, context, callback) {
+    const qtestMetadataCache = {};
 
     const DEFAULT_AREA_PATH = constants.AreaPath;
     const DEFAULT_ASSIGNED_TO_TEAM_VALUE = 1363; // Default to "Tool Chain" team in qTest if no mapping found
@@ -76,6 +77,140 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         Authorization: `bearer ${constants.QTEST_TOKEN}`,
     };
 
+    function normalizeBaseUrl(value) {
+        const raw = (value || "").toString().trim().replace(/\/+$/, "");
+        if (!raw) {
+            throw new Error("A qTest base URL is required.");
+        }
+
+        return raw.startsWith("http://") || raw.startsWith("https://")
+            ? raw
+            : `https://${raw}`;
+    }
+
+    function normalizeLabel(value) {
+        return value == null ? "" : String(value).trim().toLowerCase();
+    }
+
+    function normalizeFieldResponse(data) {
+        if (Array.isArray(data)) return data;
+        if (Array.isArray(data?.items)) return data.items;
+        if (Array.isArray(data?.data)) return data.data;
+        return [];
+    }
+
+    function getAllowedValues(fieldDefinition) {
+        return Array.isArray(fieldDefinition?.allowed_values)
+            ? fieldDefinition.allowed_values.filter(v => v?.is_active !== false)
+            : [];
+    }
+
+    async function getFieldDefinitions(objectType) {
+        const cacheKey = `${constants.ProjectID}:${objectType}`;
+        if (qtestMetadataCache[cacheKey]) {
+            return qtestMetadataCache[cacheKey];
+        }
+
+        const url = `${normalizeBaseUrl(constants.ManagerURL)}/api/v3/projects/${constants.ProjectID}/settings/${objectType}/fields`;
+        console.log(`[Debug] Fetching qTest field definitions for '${objectType}' from '${url}'.`);
+
+        const response = await axios.get(url, { headers: standardHeaders });
+        const fields = normalizeFieldResponse(response.data);
+        qtestMetadataCache[cacheKey] = fields;
+        return fields;
+    }
+
+    async function resolveFieldValue(fieldId, rawValue, objectType) {
+        if (rawValue === undefined || rawValue === null || rawValue === "") {
+            return null;
+        }
+
+        const fields = await getFieldDefinitions(objectType);
+        const fieldDefinition = fields.find(field => String(field?.id) === String(fieldId));
+
+        if (!fieldDefinition) {
+            throw new Error(`Field definition '${fieldId}' was not found for '${objectType}'.`);
+        }
+
+        if (!fieldDefinition.constrained) {
+            return rawValue;
+        }
+
+        const allowedValues = getAllowedValues(fieldDefinition);
+        const normalizedRawValue = normalizeLabel(rawValue);
+
+        const exactValueMatch = allowedValues.find(option => String(option?.value) === String(rawValue));
+        if (exactValueMatch) {
+            return exactValueMatch.value;
+        }
+
+        const exactLabelMatch = allowedValues.find(option => normalizeLabel(option?.label) === normalizedRawValue);
+        if (exactLabelMatch) {
+            return exactLabelMatch.value;
+        }
+
+        throw new Error(
+            `Unable to resolve qTest option for field '${fieldDefinition.label}' (${fieldId}) from value '${rawValue}'.`
+        );
+    }
+
+    async function resolveProjectUserId(identity) {
+        if (!identity) {
+            return null;
+        }
+
+        const normalizedIdentity = normalizeLabel(identity);
+        if (!normalizedIdentity) {
+            return null;
+        }
+
+        const cacheKey = `projectUsers:${constants.ProjectID}`;
+        let users = qtestMetadataCache[cacheKey];
+
+        if (!users) {
+            const url = `${normalizeBaseUrl(constants.ManagerURL)}/api/v3/projects/${constants.ProjectID}/users`;
+            console.log(`[Debug] Fetching active project users from '${url}?inactive=false'.`);
+            const response = await axios.get(url, {
+                headers: standardHeaders,
+                params: { inactive: false },
+            });
+            users = normalizeFieldResponse(response.data);
+            qtestMetadataCache[cacheKey] = users;
+        }
+
+        const user = users.find(candidate => {
+            const keys = [
+                candidate?.username,
+                candidate?.ldap_username,
+                candidate?.external_user_name,
+            ];
+
+            return keys.some(value => normalizeLabel(value) === normalizedIdentity);
+        });
+
+        return user?.id ?? null;
+    }
+
+    async function resolveDefectFieldValue(fieldId, rawValue, fieldLabel) {
+        if (!fieldId || rawValue === undefined || rawValue === null || rawValue === "") {
+            return null;
+        }
+
+        try {
+            return await resolveFieldValue(fieldId, rawValue, "defects");
+        } catch (error) {
+            emitFriendlyFailure({
+                platform: "qTest",
+                objectType: "Defect",
+                objectId: event?.resource?.workItemId || "Unknown",
+                fieldName: fieldLabel,
+                fieldValue: rawValue,
+                detail: error.message,
+            });
+            throw error;
+        }
+    }
+
     const eventType = {
         CREATED: "workitem.created",
         UPDATED: "workitem.updated",
@@ -144,14 +279,48 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         return typeof value === "string" ? value.trim() : "";
     }
 
-    function mapAreaPathToQtestTeamValue(areaPath) {
+    function normalizeAdoStatusForQtest(status) {
+        const mapping = {
+            Active: "In Analysis",
+            Cancelled: "Rejected",
+        };
+
+        return mapping[status] || status;
+    }
+
+    async function mapAreaPathToQtestTeamValue(areaPath) {
         const label = normalizeAreaPathLabel(areaPath);
-        let mappedValue = AREA_PATH_TO_QTEST_TEAM_VALUE[label];
-        if (!AREA_PATH_TO_QTEST_TEAM_VALUE[label]) {
-            mappedValue = AREA_PATH_TO_QTEST_TEAM_VALUE[DEFAULT_AREA_PATH];
-            console.log(`[Info] Area Path '${label}' not found. Using default team value: '${mappedValue}' for default area path '${DEFAULT_AREA_PATH}'.`);
+        if (label) {
+            try {
+                return await resolveDefectFieldValue(
+                    constants.DefectAssignedToTeamFieldID,
+                    label,
+                    "Assigned to Team"
+                );
+            } catch (error) {
+                console.log(`[Warn] Area Path '${label}' could not be resolved in qTest. Attempting default area path '${DEFAULT_AREA_PATH}'.`);
+            }
         }
-        return mappedValue;
+
+        if (!DEFAULT_AREA_PATH) {
+            return DEFAULT_ASSIGNED_TO_TEAM_VALUE;
+        }
+
+        try {
+            const fallbackValue = await resolveDefectFieldValue(
+                constants.DefectAssignedToTeamFieldID,
+                DEFAULT_AREA_PATH,
+                "Assigned to Team"
+            );
+            console.log(`[Info] Using default team value '${fallbackValue}' for default area path '${DEFAULT_AREA_PATH}'.`);
+            return fallbackValue;
+        } catch (error) {
+            console.log(
+                `[Warn] Default area path '${DEFAULT_AREA_PATH}' could not be resolved dynamically. ` +
+                `Falling back to configured default team value '${DEFAULT_ASSIGNED_TO_TEAM_VALUE}'.`
+            );
+            return DEFAULT_ASSIGNED_TO_TEAM_VALUE;
+        }
     }
 
     function mapQtestTeamValueToAreaPath(valueId) {
@@ -228,25 +397,11 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     async function resolveQtestUserIdByUsernameOrUpn(identity, standardHeaders) {
         if (!identity) return null;
 
-        const url = `https://${constants.ManagerURL}/api/v3/users/search?username=${encodeURIComponent(identity)}`;
-
         try {
-            const resp = await axios.get(url, { headers: standardHeaders });
-            const data = resp && resp.data;
-
-            const arr = Array.isArray(data)
-                ? data
-                : Array.isArray(data?.items)
-                    ? data.items
-                    : Array.isArray(data?.data)
-                        ? data.data
-                        : [];
-
-            const user = arr[0];
-            return user?.id ?? null;
+            return await resolveProjectUserId(identity);
         } catch (e) {
             console.error(
-                `[Error] qTest user search failed for '${identity}'. ` +
+                `[Error] qTest project user lookup failed for '${identity}'. ` +
                 `Status: ${e?.response?.status ?? "n/a"}`
             );
             return null;
@@ -550,7 +705,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const adoAreaPath = fields[constants.AzDoAreaPathFieldRef || "System.AreaPath"] || "";
     console.log(`[Info] ADO AreaPath value: '${adoAreaPath}'`);
 
-    const qtestAssignedToTeamValue = mapAreaPathToQtestTeamValue(adoAreaPath);
+    const qtestAssignedToTeamValue = await mapAreaPathToQtestTeamValue(adoAreaPath);
     console.log(
         `[Info] Mapped ADO AreaPath '${adoAreaPath || "(blank)"}' to qTest Assigned to Team value '${qtestAssignedToTeamValue}'`
     );
@@ -604,69 +759,43 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const adoSeverity = fields["Microsoft.VSTS.Common.Severity"];
     console.log(`[Info] ADO Severity value: '${adoSeverity}'`);
 
-    const severityMap = {
-        "1 - Critical": 10301,
-        "2 - High": 10302,
-        "3 - Medium": 10303,
-        "4 - Low": 10304,
-    };
-
-    const qtestSeverityValue = severityMap[adoSeverity] || null;
+    const qtestSeverityValue = await resolveDefectFieldValue(
+        constants.DefectSeverityFieldID,
+        adoSeverity,
+        "Severity"
+    );
     console.log(`[Info] Mapped ADO Severity '${adoSeverity}' to qTest Severity`);
 
     const adoPriority = fields["Microsoft.VSTS.Common.Priority"];
     console.log(`[Info] ADO Priority value: '${adoPriority}'`);
 
-    const priorityMap = {
-        1: 11169,
-        2: 10204,
-        3: 10203,
-        4: 10202,
-    };
-
-    const qtestPriorityValue = priorityMap[adoPriority] || null;
+    const qtestPriorityValue = await resolveDefectFieldValue(
+        constants.DefectPriorityFieldID,
+        adoPriority,
+        "Priority"
+    );
     console.log(`[Info] Mapped ADO Priority '${adoPriority}' to qTest Priority value '${qtestPriorityValue}'`);
 
     const adoDefectType = fields["BP.ERP.DefectType"];
     console.log(`[Info] ADO Defect Type value: '${adoDefectType}'`);
 
-    const defectTypeMap = {
-        "New_Requirement": 956,
-        "Code": 957,
-        "Data": 958,
-        "Environment": 959,
-        "Infrastructure": 960,
-        "User Authorization": 961,
-        "Configuration": 962,
-        "User Handling": 963,
-        "Translation": 964,
-        "Automation": 965,
-    };
-
-    const qtestDefectTypeValue = defectTypeMap[adoDefectType] || null;
+    const qtestDefectTypeValue = await resolveDefectFieldValue(
+        constants.DefectTypeFieldID,
+        adoDefectType,
+        "Defect Type"
+    );
     console.log(`[Info] Mapped ADO Defect Type '${adoDefectType}' to qTest Defect Type value '${qtestDefectTypeValue}'`);
 
     const adoState = fields["System.State"];
     console.log(`[Info] ADO State value: '${adoState}'`);
+    const qtestStatusLabel = normalizeAdoStatusForQtest(adoState);
 
-    const stateMap = {
-        "New": 10001,
-        "In Analysis": 10002,
-        "Active": 10002,
-        "In Resolution": 10004,
-        "Awaiting Implementation": 10003,
-        "Resolved": 10953,
-        "Retest": 10880,
-        "Reopened": 10882,
-        "Closed": 10881,
-        "On Hold": 10883,
-        "Rejected": 10853,
-        "Cancelled": 10853,
-        "Triage": 11376
-    };
-
-    const qtestStatusValue = stateMap[adoState] || null;
-    console.log(`[Info] Mapped ADO State '${adoState}' to qTest Status value '${qtestStatusValue}'`);
+    const qtestStatusValue = await resolveDefectFieldValue(
+        constants.DefectStatusFieldID,
+        qtestStatusLabel,
+        "Status"
+    );
+    console.log(`[Info] Mapped ADO State '${adoState}' to qTest Status label '${qtestStatusLabel}' and qTest Status value '${qtestStatusValue}'`);
     if (!qtestStatusValue) {
         console.log(`[Warn] ADO State '${adoState}' does not match any defined qTest status.`);
     }
@@ -709,19 +838,11 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         "";
     console.log(`[Info] ADO Resolved Reason: '${adoResolvedReason}'`);
 
-    const resolvedReasonMap = {
-        "As Designed": 1299,
-        "Cannot Reproduce": 1300,
-        "Copied to Backlog": 1301,
-        "Deferred": 1302,
-        "Duplicate": 1303,
-        "Fixed": 1304,
-        "Fixed and verified": 1305,
-        "Obsolete": 1306,
-        "Will not Fix": 1307,
-    };
-
-    const qtestResolvedReasonValue = resolvedReasonMap[adoResolvedReason] || null;
+    const qtestResolvedReasonValue = await resolveDefectFieldValue(
+        constants.DefectResolvedReasonFieldID,
+        adoResolvedReason,
+        "Resolved Reason"
+    );
     console.log(`[Info] Mapped ADO Resolved Reason '${adoResolvedReason}' → qTest value '${qtestResolvedReasonValue}'`);
 
     if (defectToUpdate) {

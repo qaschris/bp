@@ -48,6 +48,58 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     return resp.data;
   }
 
+  function getEventFieldIds(eventData) {
+    const fieldIds = [];
+    const pushIfPresent = value => {
+      if (value !== undefined && value !== null && value !== "") {
+        fieldIds.push(String(value));
+      }
+    };
+
+    pushIfPresent(eventData?.field_id);
+    pushIfPresent(eventData?.fieldId);
+    pushIfPresent(eventData?.property?.field_id);
+    pushIfPresent(eventData?.property?.fieldId);
+    pushIfPresent(eventData?.change?.field_id);
+    pushIfPresent(eventData?.change?.fieldId);
+    pushIfPresent(eventData?.change?.property_id);
+
+    const collections = [
+      eventData?.fields,
+      eventData?.properties,
+      eventData?.changes,
+    ];
+
+    for (const collection of collections) {
+      if (!Array.isArray(collection)) continue;
+
+      for (const item of collection) {
+        pushIfPresent(item?.field_id);
+        pushIfPresent(item?.fieldId);
+        pushIfPresent(item?.property_id);
+      }
+    }
+
+    return [...new Set(fieldIds)];
+  }
+
+  function shouldProcessStatusEvent(eventData, statusFieldId) {
+    const eventFieldIds = getEventFieldIds(eventData);
+    if (!eventFieldIds.length) {
+      console.log("[Info] qTest event does not expose changed field ids. Continuing with status sync.");
+      return true;
+    }
+
+    console.log(`[Debug] qTest event field ids: ${JSON.stringify(eventFieldIds)}`);
+
+    if (!eventFieldIds.includes(String(statusFieldId))) {
+      console.log(`[Info] qTest event does not reference status field '${statusFieldId}'. Skipping to prevent loop.`);
+      return false;
+    }
+
+    return true;
+  }
+
   try {
     console.log(`[Info] Incoming event: ${JSON.stringify(event, null, 2)}`);
 
@@ -77,6 +129,10 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const managerUrl = constants.ManagerURL;
     const adoProjectUrl = constants.AzDoProjectURL;
     const adoTestingStatusFieldRef = constants.AzDoTestingStatusFieldRef || "Custom.TestingStatus";
+
+    if (!shouldProcessStatusEvent(event, statusFieldId)) {
+      return;
+    }
 
     const statusMap = {
       11163: "SIT 1 In Progress",

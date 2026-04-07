@@ -2,6 +2,8 @@ const axios = require("axios");
 const { Webhooks } = require('@qasymphony/pulse-sdk');
 
 exports.handler = async function ({ event, constants, triggers }, context, callback) {
+    const qtestMetadataCache = {};
+
     function emitEvent(name, payload) {
         return (t = triggers.find(t => t.name === name))
             ? new Webhooks().invoke(t, payload)
@@ -163,6 +165,149 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         "Content-Type": "application/json",
         Authorization: `bearer ${constants.QTEST_TOKEN}`,
     };
+
+    function normalizeBaseUrl(value) {
+        const raw = (value || "").toString().trim().replace(/\/+$/, "");
+        if (!raw) {
+            throw new Error("A qTest base URL is required.");
+        }
+
+        return raw.startsWith("http://") || raw.startsWith("https://")
+            ? raw
+            : `https://${raw}`;
+    }
+
+    function normalizeLabel(value) {
+        return value == null ? "" : String(value).trim().toLowerCase();
+    }
+
+    function normalizeFieldResponse(data) {
+        if (Array.isArray(data)) return data;
+        if (Array.isArray(data?.items)) return data.items;
+        if (Array.isArray(data?.data)) return data.data;
+        return [];
+    }
+
+    function getAllowedValues(fieldDefinition) {
+        return Array.isArray(fieldDefinition?.allowed_values)
+            ? fieldDefinition.allowed_values.filter(v => v?.is_active !== false)
+            : [];
+    }
+
+    async function getFieldDefinitions(objectType) {
+        const cacheKey = `${constants.ProjectID}:${objectType}`;
+        if (qtestMetadataCache[cacheKey]) {
+            return qtestMetadataCache[cacheKey];
+        }
+
+        const url = `${normalizeBaseUrl(constants.ManagerURL)}/api/v3/projects/${constants.ProjectID}/settings/${objectType}/fields`;
+        console.log(`[Debug] Fetching qTest field definitions for '${objectType}' from '${url}'.`);
+
+        const response = await axios.get(url, { headers: standardHeaders });
+        const fields = normalizeFieldResponse(response.data);
+        qtestMetadataCache[cacheKey] = fields;
+        return fields;
+    }
+
+    async function resolveFieldValue(fieldId, rawValue, objectType) {
+        if (rawValue === undefined || rawValue === null || rawValue === "") {
+            return null;
+        }
+
+        const fields = await getFieldDefinitions(objectType);
+        const fieldDefinition = fields.find(field => String(field?.id) === String(fieldId));
+
+        if (!fieldDefinition) {
+            throw new Error(`Field definition '${fieldId}' was not found for '${objectType}'.`);
+        }
+
+        if (!fieldDefinition.constrained) {
+            return rawValue;
+        }
+
+        const allowedValues = getAllowedValues(fieldDefinition);
+        const normalizedRawValue = normalizeLabel(rawValue);
+
+        const exactValueMatch = allowedValues.find(option => String(option?.value) === String(rawValue));
+        if (exactValueMatch) {
+            return exactValueMatch.value;
+        }
+
+        const exactLabelMatch = allowedValues.find(option => normalizeLabel(option?.label) === normalizedRawValue);
+        if (exactLabelMatch) {
+            return exactLabelMatch.value;
+        }
+
+        throw new Error(
+            `Unable to resolve qTest option for field '${fieldDefinition.label}' (${fieldId}) from value '${rawValue}'.`
+        );
+    }
+
+    const relevantUpdatedFieldRefs = new Set([
+        "System.Title",
+        "System.WorkItemType",
+        "System.AreaPath",
+        "System.IterationPath",
+        "System.State",
+        "System.Reason",
+        "System.AssignedTo",
+        "System.Description",
+        "Microsoft.VSTS.Common.AcceptanceCriteria",
+        "Microsoft.VSTS.Common.Priority",
+        "Custom.Complexity",
+        "Custom.ApplicationName",
+        "Custom.ProcessRelease",
+        "Custom.RICEFWID",
+        "Custom.TestingStatus",
+        "Custom.BPFeatureType",
+        "Custom.Area",
+        "BP.ERP.RICEFW",
+    ]);
+
+    function getChangedFieldRefs(eventData) {
+        if (eventData?.eventType !== "workitem.updated") {
+            return [];
+        }
+
+        return Object.keys(eventData?.resource?.fields || {});
+    }
+
+    function shouldProcessRicefwUpdate(eventData) {
+        const changedFieldRefs = getChangedFieldRefs(eventData);
+
+        if (!changedFieldRefs.length) {
+            console.log("[Info] Updated event did not include field deltas. Continuing with sync.");
+            return true;
+        }
+
+        const hasRelevantChange = changedFieldRefs.some(fieldRef => relevantUpdatedFieldRefs.has(fieldRef));
+        if (!hasRelevantChange) {
+            console.log("[Info] Updated event does not include any qTest-synced RICEFW fields. Skipping to prevent loop.");
+            return false;
+        }
+
+        return true;
+    }
+
+    async function resolveRequirementFieldValue(fieldId, rawValue, fieldLabel) {
+        if (!fieldId || rawValue === undefined || rawValue === null || rawValue === "") {
+            return null;
+        }
+
+        try {
+            return await resolveFieldValue(fieldId, rawValue, "requirements");
+        } catch (error) {
+            emitFriendlyFailure({
+                platform: "qTest",
+                objectType: "RICEFW/Feature",
+                objectId: event?.resource?.workItemId || event?.resource?.id || "Unknown",
+                fieldName: fieldLabel,
+                fieldValue: rawValue,
+                detail: error.message,
+            });
+            throw error;
+        }
+    }
 
     async function doRequest(url, method, requestBody) {
         const opts = {
@@ -595,6 +740,9 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         case eventType.UPDATED:
             workItemId = event.resource.workItemId;
             console.log(`[Info] Update RICEFW Feature event received for 'WI${workItemId}'`);
+            if (!shouldProcessRicefwUpdate(event)) {
+                return;
+            }
             const getReqResult = await getRequirementByWorkItemId(workItemId);
             if (getReqResult.failed) return;
             if (!getReqResult.requirement && !constants.AllowCreationOnUpdate) {
@@ -626,29 +774,28 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const fields = getFields(event);
     const adoAreaPath = fields["System.AreaPath"] || "";
     const adoComplexity = fields["Custom.Complexity"];
-    const qtestComplexityValue = {
-        "1 - Very High": 941,
-        "2 - High": 942,
-        "3 - Medium": 943,
-        "4 - Low": 944,
-        "5 - Very Low": 945,
-    }[adoComplexity] || null;
-
-    const qtestWorkItemTypeValue = 1359;
-
     const adoPriority = fields["Microsoft.VSTS.Common.Priority"];
-    const qtestPriorityValue = {
-        1: 11355,
-        2: 11356,
-        3: 11357,
-        4: 11358,
-    }[adoPriority] || null;
-
     const adoRequirementCategory = fields["Custom.BPFeatureType"] || null;
-    const qtestTypeValue = {
-        "Change Request": 11369,
-        "RICEFW": 11370,
-    }[adoRequirementCategory] || null;
+    const qtestComplexityValue = await resolveRequirementFieldValue(
+        constants.RequirementComplexityFieldID,
+        adoComplexity,
+        "Complexity"
+    );
+    const qtestWorkItemTypeValue = await resolveRequirementFieldValue(
+        constants.RequirementWorkItemTypeFieldID,
+        "Feature",
+        "Work Item Type"
+    );
+    const qtestPriorityValue = await resolveRequirementFieldValue(
+        constants.RequirementPriorityFieldID,
+        adoPriority,
+        "Priority"
+    );
+    const qtestTypeValue = await resolveRequirementFieldValue(
+        constants.RequirementTypeFieldID,
+        adoRequirementCategory,
+        "Requirement Category"
+    );
 
     const rootModuleId = constants.FeatureParentID;
     const iterationPath = fields["System.IterationPath"] || null;
