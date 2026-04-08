@@ -6,6 +6,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const maxIterations = 21;
     const defectId = event.defect.id;
     const projectId = event.defect.project_id;
+    const qtestMetadataCache = {};
 
     console.log(`[Info] Create defect event received for defect '${defectId}' in project '${projectId}'`);
 
@@ -15,72 +16,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     }
 
     const DEFAULT_AREA_PATH = constants.AreaPath;
-    const DEFAULT_ASSIGNED_TO_TEAM_VALUE = 1189;
-
-    const AREA_PATH_TO_QTEST_TEAM_VALUE = {
-        "bp_Quantum\\Process\\Asset Management\\Squad 1 - Data": 1,
-        "bp_Quantum\\Process\\Asset Management\\AM - Work Mgmt Core": 2,
-        "bp_Quantum\\Process\\Finance\\Finance - Capex Squad": 3,
-        "bp_Quantum\\Process\\Finance\\Finance - CB Hub 2.0 Squad": 4,
-        "bp_Quantum\\Process\\Finance\\Finance - R2R Squad": 6,
-        "bp_Quantum\\Process\\Finance\\Finance - Tax Squad": 7,
-        "bp_Quantum\\Process\\Procurement\\Invoice to Pay": 8,
-        "bp_Quantum\\Process\\Procurement\\Quality and Logistics": 9,
-        "bp_Quantum\\Process\\Procurement\\Services Procurement": 10,
-        "bp_Quantum\\Process\\Procurement\\Materials Procurement": 11,
-        "bp_Quantum\\Process\\Procurement\\Source to Contract": 12,
-        "bp_Quantum\\Process\\Procurement\\Materials and Inventory": 13,
-        "bp_Quantum\\Process\\MDG\\Asset Management": 14,
-        "bp_Quantum\\Process\\MDG\\Procurement": 15,
-        "bp_Quantum\\Process\\MDG\\Finance": 16,
-        "bp_Quantum\\Process\\MDG\\Material": 17,
-        "bp_Quantum\\Data and Analytics\\ETL\\Asset Management": 18,
-        "bp_Quantum\\Data and Analytics\\ETL\\Customer Management": 19,
-        "bp_Quantum\\Data and Analytics\\ETL\\Finance": 20,
-        "bp_Quantum\\Data and Analytics\\ETL\\Material Master": 1320,
-        "bp_Quantum\\Data and Analytics\\ETL\\Procurement": 21,
-        "bp_Quantum\\Data and Analytics\\Reporting and Analytics\\Asset Management (R and A)": 89,
-        "bp_Quantum\\Data and Analytics\\Reporting and Analytics\\Finance (R and A)": 90,
-        "bp_Quantum\\Technical\\Dev and Integration\\Asset Management": 1185,
-        "bp_Quantum\\Data and Analytics\\Reporting and Analytics\\Procurement (R and A)": 1184,
-        "bp_Quantum\\Technical\\Dev and Integration\\Finance": 1186,
-        "bp_Quantum\\Technical\\Dev and Integration\\Integration": 1187,
-        "bp_Quantum\\Technical\\Dev and Integration\\Procurement": 1188,
-        "bp_Quantum\\Technical\\Testing": 1189,
-        "bp_Quantum\\Technical\\Cutover and Release Management": 1193,
-        "bp_Quantum\\Technical\\Architecture": 1195,
-        "bp_Quantum\\Technical\\Digital Security and Compliance\\Asset Management": 1194,
-        "bp_Quantum\\Technical\\Digital Security and Compliance\\Finance": 1211,
-        "bp_Quantum\\Technical\\Digital Security and Compliance\\Procurement": 1212,
-        "bp_Quantum\\Technical\\Digital Security and Compliance\\MDG": 1213,
-        "bp_Quantum\\Technical\\Digital Security and Compliance\\Cross - Entity": 1214,
-        "bp_Quantum\\Technical\\Identity and Access Management\\Asset Management": 1215,
-        "bp_Quantum\\Technical\\Identity and Access Management\\Finance": 1216,
-        "bp_Quantum\\Technical\\Identity and Access Management\\Procurement": 1217,
-        "bp_Quantum\\Technical\\Identity and Access Management\\MDG": 1218,
-        "bp_Quantum\\Technical\\Identity and Access Management\\Cross - Entity": 1219,
-        "bp_Quantum\\Technical\\Platforms\\BW4": 1220,
-        "bp_Quantum\\Technical\\Platforms\\C and P": 1221,
-        "bp_Quantum\\Technical\\Platforms\\CB": 1222,
-        "bp_Quantum\\Technical\\Platforms\\CFIN or Core": 1223,
-        "bp_Quantum\\Technical\\Platforms\\MDG": 1224,
-        "bp_Quantum\\Technical\\Platforms\\P and O": 1225,
-        "bp_Quantum\\Process\\Finance\\Finance - ARAPINTERCO Squad": 1314,
-        "bp_Quantum\\Data and Analytics\\ETL\\Site Castellon": 1332,
-        "bp_Quantum\\Data and Analytics\\ETL\\Site Kwinana": 1334,
-        "bp_Quantum\\Data and Analytics\\ETL\\Site Whiting": 1335,
-        "bp_Quantum\\Data and Analytics\\ETL\\Site Global": 1348,
-        "bp_Quantum\\Data and Analytics\\ETL\\Data office": 1349,
-        "bp_Quantum\\Technical\\Platforms\\Shared\\BTP or SaaS": 1354,
-        "bp_Quantum\\Technical\\Platforms\\Shared\\GRC": 1355,
-        "bp_Quantum\\Technical\\Platforms\\Shared\\OpenText": 1356,
-        "bp_Quantum\\Technical\\Platforms\\Shared\\TL or Architecture or GRC": 1357,
-        "bp_Quantum\\Technical\\Tool Chain": 1363
-    };
-
-    const QTEST_TEAM_VALUE_TO_AREA_PATH = Object.fromEntries(
-        Object.entries(AREA_PATH_TO_QTEST_TEAM_VALUE).map(([label, value]) => [String(value), label])
-    );
 
     function emitEvent(name, payload) {
         return (t = triggers.find(t => t.name === name))
@@ -108,6 +43,26 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         emitEvent('ChatOpsEvent', { message });
     }
 
+    function emitFriendlyWarning(details = {}) {
+        const platform = details.platform || "Unknown";
+        const objectType = details.objectType || "Object";
+        const objectId = details.objectId != null ? details.objectId : "Unknown";
+        const objectPid = details.objectPid != null && details.objectPid !== ""
+            ? ` Object PID: ${details.objectPid}.`
+            : "";
+        const fieldName = details.fieldName ? ` Field: ${details.fieldName}.` : "";
+        const fieldValue = details.fieldValue != null && details.fieldValue !== ""
+            ? ` Value: ${details.fieldValue}.`
+            : "";
+        const detail = details.detail || "Sync warning.";
+
+        const message =
+            `Sync warning. Platform: ${platform}. Object Type: ${objectType}. Object ID: ${objectId}.${objectPid}${fieldName}${fieldValue} Detail: ${detail}`;
+
+        console.log(`[Warn] ${message}`);
+        emitEvent('ChatOpsEvent', { message });
+    }
+
     function getNamePrefix(workItemId) {
         return `WI${workItemId}: `;
     }
@@ -131,13 +86,64 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         return typeof value === "string" ? value.trim() : "";
     }
 
-    function mapAreaPathToQtestTeamValue(areaPath) {
-        const label = normalizeAreaPathLabel(areaPath);
-        return AREA_PATH_TO_QTEST_TEAM_VALUE[label] || DEFAULT_ASSIGNED_TO_TEAM_VALUE;
+    function normalizeBaseUrl(value) {
+        const raw = (value || "").toString().trim().replace(/\/+$/, "");
+        if (!raw) {
+            throw new Error("A qTest base URL is required.");
+        }
+
+        return raw.startsWith("http://") || raw.startsWith("https://")
+            ? raw
+            : `https://${raw}`;
     }
 
-    function mapQtestTeamValueToAreaPath(valueId) {
-        return QTEST_TEAM_VALUE_TO_AREA_PATH[String(valueId)] || DEFAULT_AREA_PATH;
+    function normalizeFieldResponse(data) {
+        if (Array.isArray(data)) return data;
+        if (Array.isArray(data?.items)) return data.items;
+        if (Array.isArray(data?.data)) return data.data;
+        return [];
+    }
+
+    function getAllowedValues(fieldDefinition) {
+        return Array.isArray(fieldDefinition?.allowed_values)
+            ? fieldDefinition.allowed_values.filter(v => v?.is_active !== false)
+            : [];
+    }
+
+    async function getDefectFieldDefinitions() {
+        const cacheKey = `${constants.ProjectID}:defects`;
+        if (qtestMetadataCache[cacheKey]) {
+            return qtestMetadataCache[cacheKey];
+        }
+
+        const url = `${normalizeBaseUrl(constants.ManagerURL)}/api/v3/projects/${constants.ProjectID}/settings/defects/fields`;
+        const response = await axios.get(url, {
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `bearer ${constants.QTEST_TOKEN}`
+            }
+        });
+
+        const fields = normalizeFieldResponse(response.data);
+        qtestMetadataCache[cacheKey] = fields;
+        return fields;
+    }
+
+    async function getDefectFieldOptionLabelByValue(fieldId, rawValue) {
+        if (!fieldId || rawValue === undefined || rawValue === null || rawValue === "") {
+            return "";
+        }
+
+        const fields = await getDefectFieldDefinitions();
+        const fieldDefinition = fields.find(field => String(field?.id) === String(fieldId));
+        if (!fieldDefinition) {
+            return "";
+        }
+
+        const option = getAllowedValues(fieldDefinition)
+            .find(allowedValue => String(allowedValue?.value) === String(rawValue));
+
+        return normalizeAreaPathLabel(option?.label);
     }
 
     function encodeIfNeeded(url) {
@@ -334,16 +340,29 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         if (assignedToTeamField) {
             const rawTeamLabel = normalizeAreaPathLabel(assignedToTeamField.field_value_name);
             const rawTeamValue = assignedToTeamField.field_value;
-            const mappedAreaPath = QTEST_TEAM_VALUE_TO_AREA_PATH[String(rawTeamValue)];
+            let resolvedAreaPath = "";
 
-            if (mappedAreaPath) {
-                assignedToTeamLabel = mappedAreaPath;
+            try {
+                resolvedAreaPath = await getDefectFieldOptionLabelByValue(
+                    constants.DefectAssignedToTeamFieldID,
+                    rawTeamValue
+                );
+            } catch (error) {
+                console.log(
+                    `[Warn] Could not resolve qTest Assigned to Team value '${rawTeamValue}' via Fields API. ` +
+                    `Error: ${error.message}`
+                );
+            }
+
+            assignedToTeamLabel = normalizeAreaPathLabel(resolvedAreaPath || rawTeamLabel);
+
+            if (assignedToTeamLabel) {
                 console.log(`[Info] Defect Assigned to Team resolved from qTest value '${rawTeamValue}' to ADO AreaPath '${assignedToTeamLabel}'`);
             } else {
                 assignedToTeamLabel = DEFAULT_AREA_PATH;
                 assignedToTeamWarningValue = `${rawTeamLabel || rawTeamValue || "(blank)"}`;
                 assignedToTeamWarning =
-                    `Assigned to Team value in qTest was not mapped. Raw label='${rawTeamLabel || ""}', raw value='${rawTeamValue || ""}'. Defaulted ADO AreaPath to '${DEFAULT_AREA_PATH}'.`;
+                    `Assigned to Team value in qTest could not be resolved. Raw label='${rawTeamLabel || ""}', raw value='${rawTeamValue || ""}'. Defaulted ADO AreaPath to '${DEFAULT_AREA_PATH}'.`;
 
                 console.log(`[Warn] ${assignedToTeamWarning}`);
             }
@@ -744,18 +763,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const defectDetails = await getDefectDetailsByIdWithRetry(defectId);
     if (!defectDetails) return;
 
-    if (defectDetails.assignedToTeamWarning) {
-        emitFriendlyFailure({
-            platform: "ADO",
-            objectType: "Defect",
-            objectId: defectId,
-            objectPid: defectDetails.pid,
-            fieldName: "System.AreaPath",
-            fieldValue: defectDetails.assignedToTeamWarningValue,
-            detail: defectDetails.assignedToTeamWarning
-        });
-    }
-
     const bug = await createAzDoBug(
         defectId,
         defectDetails.pid,
@@ -782,4 +789,16 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
     const summaryUpdated = await updateDefectSummary(defectId, constants.DefectSummaryFieldID, newSummary);
     if (!summaryUpdated) return;
+
+    if (defectDetails.assignedToTeamWarning) {
+        emitFriendlyWarning({
+            platform: "ADO",
+            objectType: "Defect",
+            objectId: workItemId,
+            objectPid: defectDetails.pid,
+            fieldName: "System.AreaPath",
+            fieldValue: defectDetails.assignedToTeamWarningValue,
+            detail: defectDetails.assignedToTeamWarning
+        });
+    }
 };

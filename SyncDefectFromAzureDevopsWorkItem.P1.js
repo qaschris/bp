@@ -310,6 +310,28 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         return mapping[status] || status;
     }
 
+    function mapAdoSeverityToQtestValue(adoSeverity) {
+        const severityMap = {
+            "1 - Critical": 10301,
+            "2 - High": 10302,
+            "3 - Medium": 10303,
+            "4 - Low": 10304,
+        };
+
+        return severityMap[adoSeverity] || null;
+    }
+
+    function mapAdoPriorityToQtestValue(adoPriority) {
+        const priorityMap = {
+            1: 11169,
+            2: 10204,
+            3: 10203,
+            4: 10202,
+        };
+
+        return priorityMap[adoPriority] || null;
+    }
+
     async function mapAreaPathToQtestTeamValue(areaPath, defectContext = null) {
         const label = normalizeAreaPathLabel(areaPath);
         if (label) {
@@ -822,23 +844,13 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const adoSeverity = fields["Microsoft.VSTS.Common.Severity"];
         console.log(`[Info] ADO Severity value: '${adoSeverity}'`);
 
-    const qtestSeverityValue = await resolveDefectFieldValue(
-        constants.DefectSeverityFieldID,
-        adoSeverity,
-        "Severity",
-        defectContext
-    );
-    console.log(`[Info] Mapped ADO Severity '${adoSeverity}' to qTest Severity`);
+    const qtestSeverityValue = mapAdoSeverityToQtestValue(adoSeverity);
+    console.log(`[Info] Mapped ADO Severity '${adoSeverity}' to qTest Severity value '${qtestSeverityValue}'`);
 
     const adoPriority = fields["Microsoft.VSTS.Common.Priority"];
     console.log(`[Info] ADO Priority value: '${adoPriority}'`);
 
-    const qtestPriorityValue = await resolveDefectFieldValue(
-        constants.DefectPriorityFieldID,
-        adoPriority,
-        "Priority",
-        defectContext
-    );
+    const qtestPriorityValue = mapAdoPriorityToQtestValue(adoPriority);
     console.log(`[Info] Mapped ADO Priority '${adoPriority}' to qTest Priority value '${qtestPriorityValue}'`);
 
     const adoDefectType = fields["BP.ERP.DefectType"];
