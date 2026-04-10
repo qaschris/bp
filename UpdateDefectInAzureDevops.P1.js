@@ -7,6 +7,8 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
   let failureReported = false;
   const emittedMessageKeys = new Set();
   let adoFieldRefs = null;
+  const DEFECT_APPLICATION_FIELD_ID = normalizeText(constants.DefectApplicationFieldID) || "1566";
+  const DEFECT_SITE_NAME_FIELD_ID = normalizeText(constants.DefectSiteNameFieldID) || "1569";
 
   function emitEvent(name, payload) {
     return (t = triggers.find(t => t.name === name))
@@ -71,6 +73,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
       : String(value)
         .normalize("NFKC")
         .replace(/[\u200B-\u200D\uFEFF]/g, "")
+        .replace(/<0x(?:200b|200c|200d|feff)>/gi, "")
         .trim();
   }
 
@@ -134,6 +137,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
       "DefectStatusFieldID",
       "DefectAffectedReleaseFieldID",
       "DefectExternalReferenceFieldID",
+      "DefectRootCauseFieldID",
       "DefectAssignedToFieldID",
       "DefectAssignedToTeamFieldID",
       "DefectTargetDateFieldID",
@@ -152,9 +156,25 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     }
 
     adoFieldRefs = buildAdoFieldRefs();
-    const missingAdoRefs = Object.entries(adoFieldRefs)
-      .filter(([, value]) => !value)
-      .map(([key]) => key);
+    const requiredAdoRefKeys = [
+      "title",
+      "reproSteps",
+      "state",
+      "severity",
+      "priority",
+      "defectType",
+      "externalReference",
+      "bugStage",
+      "rootCause",
+      "proposedFix",
+      "closedDate",
+      "resolvedReason",
+      "areaPath",
+      "assignedTo",
+      "targetDate",
+    ];
+    const missingAdoRefs = requiredAdoRefKeys
+      .filter(key => !adoFieldRefs[key]);
 
     if (missingAdoRefs.length) {
       emitFriendlyFailure({
@@ -466,9 +486,9 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const workItemId = wiMatch[1];
     console.log("[Info] Found Azure Work Item ID:", workItemId);
 
-    const applicationProp = getPropById(constants.DefectApplicationFieldID);
+    const applicationProp = getPropById(DEFECT_APPLICATION_FIELD_ID);
     const sourceTeamProp = getPropById(constants.DefectSourceTeamFieldID);
-    const siteNameProp = getPropById(constants.DefectSiteNameFieldID);
+    const siteNameProp = getPropById(DEFECT_SITE_NAME_FIELD_ID);
     const severityProp = getPropById(constants.DefectSeverityFieldID);
     const priorityProp = getPropById(constants.DefectPriorityFieldID);
     const defectTypeProp = getPropById(constants.DefectTypeFieldID);
@@ -485,9 +505,9 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const targetDate = norm(firstNonEmpty(targetDateProp?.field_value));
 
     const adoTitle = stripWorkItemPrefix(summary);
-    const appLabel = normalizeText(await getDefectFieldLabel(constants.DefectApplicationFieldID, applicationProp));
+    const appLabel = normalizeText(await getDefectFieldLabel(DEFECT_APPLICATION_FIELD_ID, applicationProp));
     const srcLabel = normalizeText(await getDefectFieldLabel(constants.DefectSourceTeamFieldID, sourceTeamProp));
-    const siteLabel = normalizeText(await getDefectFieldLabel(constants.DefectSiteNameFieldID, siteNameProp));
+    const siteLabel = normalizeText(await getDefectFieldLabel(DEFECT_SITE_NAME_FIELD_ID, siteNameProp));
     const assignedLabel = norm(firstNonEmpty(assignedToProp?.field_value));
     const assignedToLabel = norm(firstNonEmpty(assignedToProp?.field_value_name));
     const externalReference = norm(firstNonEmpty(externalReferenceProp?.field_value));
@@ -498,6 +518,12 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const mappedDefectType = mapDefectType(defectTypeProp?.field_value);
     const mappedStatus = mapStatus(statusProp?.field_value);
     const mappedBugStage = mapAffectedRelease(affectedReleaseProp?.field_value);
+    console.log("[Debug] Root Cause target ADO field ref:", adoFieldRefs.rootCause);
+    console.log("[Debug] qTest Root Cause source:", {
+      fieldId: constants.DefectRootCauseFieldID,
+      rawValue: rootCauseProp?.field_value ?? null,
+      rawLabel: rootCauseProp?.field_value_name ?? null,
+    });
     const rootCauseLabel = await getDefectFieldLabel(constants.DefectRootCauseFieldID, rootCauseProp);
     const resolvedReasonLabel = await getDefectFieldLabel(constants.DefectResolvedReasonFieldID, resolvedReasonProp);
 
@@ -733,17 +759,17 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
       patchData.push(buildFieldPatchOperation(adoFieldRefs.resolvedReason, resolvedReasonLabel));
     }
 
-    if (appLabel && curApp !== appLabel) {
+    if (adoFieldRefs.application && appLabel && curApp !== appLabel) {
       console.log("[Info] Updating Application:", { from: curApp || "(empty)", to: appLabel });
       patchData.push(buildFieldPatchOperation(adoFieldRefs.application, appLabel));
     }
 
-    if (srcLabel && curSrc !== srcLabel) {
+    if (adoFieldRefs.sourceTeam && srcLabel && curSrc !== srcLabel) {
       console.log("[Info] Updating SourceTeam:", { from: curSrc || "(empty)", to: srcLabel });
       patchData.push(buildFieldPatchOperation(adoFieldRefs.sourceTeam, srcLabel));
     }
 
-    if (siteLabel && curSite !== siteLabel) {
+    if (adoFieldRefs.siteName && siteLabel && curSite !== siteLabel) {
       console.log("[Info] Updating SubEntity:", { from: curSite || "(empty)", to: siteLabel });
       patchData.push(buildFieldPatchOperation(adoFieldRefs.siteName, siteLabel));
     }

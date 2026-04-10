@@ -16,6 +16,8 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     let failureReported = false;
     const emittedMessageKeys = new Set();
     let adoFieldRefs = null;
+    const DEFECT_APPLICATION_FIELD_ID = normalizeText(constants.DefectApplicationFieldID) || "1566";
+    const DEFECT_SITE_NAME_FIELD_ID = normalizeText(constants.DefectSiteNameFieldID) || "1569";
 
     console.log(`[Info] Create defect event received for defect '${defectId}' in project '${projectId}'`);
 
@@ -36,6 +38,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             : String(value)
                 .normalize("NFKC")
                 .replace(/[\u200B-\u200D\uFEFF]/g, "")
+                .replace(/<0x(?:200b|200c|200d|feff)>/gi, "")
                 .trim();
     }
 
@@ -59,6 +62,8 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             externalReference: normalizeText(constants.AzDoExternalReferenceFieldRef),
             rootCause: normalizeText(constants.AzDoRootCauseFieldRef),
             proposedFix: normalizeText(constants.AzDoProposedFixFieldRef),
+            application: normalizeText(constants.AzDoApplicationFieldRef),
+            siteName: normalizeText(constants.AzDoSiteNameFieldRef),
             closedDate: normalizeText(constants.AzDoClosedDateFieldRef),
             resolvedReason: normalizeText(constants.AzDoResolvedReasonFieldRef),
             targetDate: normalizeText(constants.AzDoTargetDateFieldRef),
@@ -76,6 +81,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             "DefectAffectedReleaseFieldID",
             "DefectCreatedByFieldID",
             "DefectExternalReferenceFieldID",
+            "DefectRootCauseFieldID",
             "DefectAssignedToFieldID",
             "DefectAssignedToTeamFieldID",
             "DefectTargetDateFieldID",
@@ -94,9 +100,25 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         }
 
         adoFieldRefs = buildAdoFieldRefs();
-        const missingAdoRefs = Object.entries(adoFieldRefs)
-            .filter(([, value]) => !value)
-            .map(([key]) => key);
+        const requiredAdoRefKeys = [
+            "title",
+            "reproSteps",
+            "tags",
+            "state",
+            "severity",
+            "priority",
+            "areaPath",
+            "assignedTo",
+            "defectType",
+            "bugStage",
+            "createdBy",
+            "externalReference",
+            "rootCause",
+            "proposedFix",
+            "targetDate",
+        ];
+        const missingAdoRefs = requiredAdoRefKeys
+            .filter(key => !adoFieldRefs[key]);
 
         if (missingAdoRefs.length) {
             emitFriendlyFailure({
@@ -399,6 +421,8 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         const affectedReleaseField = getFieldById(defect, constants.DefectAffectedReleaseFieldID);
         const createdByField = getFieldById(defect, constants.DefectCreatedByFieldID);
         const externalReferenceField = getFieldById(defect, constants.DefectExternalReferenceFieldID);
+        const applicationField = getFieldById(defect, DEFECT_APPLICATION_FIELD_ID);
+        const siteNameField = getFieldById(defect, DEFECT_SITE_NAME_FIELD_ID);
         const rootCauseField = constants.DefectRootCauseFieldID ? getFieldById(defect, constants.DefectRootCauseFieldID) : null;
         const proposedFixField = constants.DefectProposedFixFieldID ? getFieldById(defect, constants.DefectProposedFixFieldID) : null;
         const closedDateField = constants.DefectClosedDateFieldID ? getFieldById(defect, constants.DefectClosedDateFieldID) : null;
@@ -466,6 +490,20 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         const externalReference = externalReferenceField ? externalReferenceField.field_value : null;
         console.log(`[Info] Defect External Reference: ${externalReference}`);
 
+        const application = await getDefectFieldLabel(DEFECT_APPLICATION_FIELD_ID, applicationField);
+        console.log(`[Info] Defect Application: ${application}`);
+
+        const siteName = await getDefectFieldLabel(DEFECT_SITE_NAME_FIELD_ID, siteNameField);
+        console.log(`[Info] Defect Site Name: ${siteName}`);
+
+        console.log(`[Debug] Root Cause target ADO field ref: '${adoFieldRefs.rootCause}'`);
+        console.log(
+            `[Debug] qTest Root Cause source: ${JSON.stringify({
+                fieldId: constants.DefectRootCauseFieldID,
+                rawValue: rootCauseField?.field_value ?? null,
+                rawLabel: rootCauseField?.field_value_name ?? null,
+            })}`
+        );
         const rootCause = await getDefectFieldLabel(constants.DefectRootCauseFieldID, rootCauseField);
         console.log(`[Info] Defect Root Cause: ${rootCause}`);
 
@@ -554,6 +592,8 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             affectedRelease,
             createdBy,
             externalReference,
+            application,
+            siteName,
             rootCause,
             proposedFix,
             closedDate,
@@ -672,6 +712,9 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         }
     }
 
+    // Legacy helper kept for reference only. The active create path is
+    // createAzDoBugWithFallback(), which intentionally does not push
+    // Closed Date or Resolved Reason during initial defect creation.
     async function createAzDoBug(
         defectId,
         defectPid,
@@ -927,6 +970,15 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         );
     }
 
+    function buildAdoTags(defectPid) {
+        const tags = ["qTest-Dev"];
+        const normalizedPid = normalizeText(defectPid);
+        if (normalizedPid) {
+            tags.push(normalizedPid);
+        }
+        return tags.join("; ");
+    }
+
     async function postAdoBug(url, requestBody) {
         return axios.post(url, requestBody, {
             headers: {
@@ -950,6 +1002,8 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         qtestAffectedRelease,
         qtestCreatedBy,
         qtestExternalReference,
+        qtestApplication,
+        qtestSiteName,
         qtestRootCause,
         qtestProposedFix,
         qtestClosedDate,
@@ -981,11 +1035,12 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             console.log(`[Info] Skipping Affected Release sync - either not set or value is 'P&O Release 1'`);
         }
         console.log(`[Info] Final ADO AreaPath to send: ${finalAreaPath}`);
+        console.log(`[Debug] Root Cause target ADO field ref: '${adoFieldRefs.rootCause}'`);
 
         const requestBody = [
             buildFieldPatchOperation(adoFieldRefs.title, name),
             buildFieldPatchOperation(adoFieldRefs.reproSteps, description),
-            buildFieldPatchOperation(adoFieldRefs.tags, "qTest-Dev"),
+            buildFieldPatchOperation(adoFieldRefs.tags, buildAdoTags(defectPid)),
             buildFieldPatchOperation(adoFieldRefs.state, mappedStatus),
             buildFieldPatchOperation(adoFieldRefs.severity, mappedSeverity),
             buildFieldPatchOperation(adoFieldRefs.priority, mappedPriority),
@@ -1024,20 +1079,20 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             requestBody.push(buildFieldPatchOperation(adoFieldRefs.externalReference, qtestExternalReference));
         }
 
+        if (adoFieldRefs.application && qtestApplication) {
+            requestBody.push(buildFieldPatchOperation(adoFieldRefs.application, qtestApplication));
+        }
+
+        if (adoFieldRefs.siteName && qtestSiteName) {
+            requestBody.push(buildFieldPatchOperation(adoFieldRefs.siteName, qtestSiteName));
+        }
+
         if (qtestRootCause) {
             requestBody.push(buildFieldPatchOperation(adoFieldRefs.rootCause, qtestRootCause));
         }
 
         if (qtestProposedFix) {
             requestBody.push(buildFieldPatchOperation(adoFieldRefs.proposedFix, qtestProposedFix));
-        }
-
-        if (qtestClosedDate) {
-            requestBody.push(buildFieldPatchOperation(adoFieldRefs.closedDate, formatDateOnly(qtestClosedDate)));
-        }
-
-        if (qtestResolvedReason) {
-            requestBody.push(buildFieldPatchOperation(adoFieldRefs.resolvedReason, qtestResolvedReason));
         }
 
         if (qtestTargetDate) {
@@ -1223,6 +1278,8 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         defectDetails.affectedRelease,
         defectDetails.createdBy,
         defectDetails.externalReference,
+        defectDetails.application,
+        defectDetails.siteName,
         defectDetails.rootCause,
         defectDetails.proposedFix,
         defectDetails.closedDate,

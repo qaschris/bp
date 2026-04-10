@@ -6,6 +6,9 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     let failureReported = false;
     const emittedMessageKeys = new Set();
     let adoFieldRefs = null;
+    const DEFECT_APPLICATION_FIELD_ID = normalizeText(constants.DefectApplicationFieldID) || "1566";
+    const DEFECT_SITE_NAME_FIELD_ID = normalizeText(constants.DefectSiteNameFieldID) || "1569";
+    const DEFECT_LINK_TO_AZURE_DEVOPS_LABEL = "Link to Azure DevOps";
 
     const DEFAULT_AREA_PATH = constants.AreaPath;
     const DEFAULT_QTEST_ASSIGNED_TO_IDENTITY = "ado-qtest-svc@bp.com";
@@ -32,6 +35,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             : String(value)
                 .normalize("NFKC")
                 .replace(/[\u200B-\u200D\uFEFF]/g, "")
+                .replace(/<0x(?:200b|200c|200d|feff)>/gi, "")
                 .trim();
     }
 
@@ -44,6 +48,14 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         if (Array.isArray(data?.items)) return data.items;
         if (Array.isArray(data?.data)) return data.data;
         return [];
+    }
+
+    function safeJson(value) {
+        try {
+            return JSON.stringify(value);
+        } catch (error) {
+            return `[Unserializable: ${error.message}]`;
+        }
     }
 
     function getAllowedValues(fieldDefinition, options = {}) {
@@ -162,6 +174,49 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         }
     }
 
+    async function resolveOptionalDefectFieldValue(fieldId, rawValue, fieldLabel, defectContext = null) {
+        if (!fieldId || rawValue === undefined || rawValue === null || rawValue === "") {
+            return { value: null, warningDetails: null };
+        }
+
+        try {
+            const value = await resolveDefectFieldValue(
+                fieldId,
+                rawValue,
+                fieldLabel,
+                defectContext,
+                { emitFailure: false, includeInactive: true }
+            );
+
+            return { value, warningDetails: null };
+        } catch (error) {
+            return {
+                value: null,
+                warningDetails: {
+                    platform: "qTest",
+                    objectType: "Defect",
+                    objectId: defectContext?.id ?? event?.resource?.workItemId ?? "Unknown",
+                    objectPid: defectContext?.pid,
+                    fieldName: fieldLabel,
+                    fieldValue: rawValue,
+                    detail: error.message,
+                    dedupKey: `warning:${fieldLabel}:${defectContext?.id ?? event?.resource?.workItemId ?? "unknown"}:${normalizeLabel(rawValue)}`,
+                },
+            };
+        }
+    }
+
+    async function getDefectFieldIdByLabel(fieldLabel) {
+        const normalizedFieldLabel = normalizeLabel(fieldLabel);
+        if (!normalizedFieldLabel) {
+            return null;
+        }
+
+        const fields = await getFieldDefinitions("defects");
+        const fieldDefinition = fields.find(field => normalizeLabel(field?.label) === normalizedFieldLabel);
+        return fieldDefinition?.id ?? null;
+    }
+
     function buildAdoFieldRefs() {
         return {
             title: normalizeText(constants.AzDoTitleFieldRef),
@@ -178,6 +233,8 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             resolvedReason: normalizeText(constants.AzDoResolvedReasonFieldRef),
             areaPath: normalizeText(constants.AzDoAreaPathFieldRef),
             assignedTo: normalizeText(constants.AzDoAssignedToFieldRef),
+            application: normalizeText(constants.AzDoApplicationFieldRef),
+            siteName: normalizeText(constants.AzDoSiteNameFieldRef),
         };
     }
 
@@ -210,9 +267,24 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         }
 
         adoFieldRefs = buildAdoFieldRefs();
-        const missingAdoRefs = Object.entries(adoFieldRefs)
-            .filter(([, value]) => !value)
-            .map(([key]) => key);
+        const requiredAdoRefKeys = [
+            "title",
+            "reproSteps",
+            "state",
+            "severity",
+            "priority",
+            "defectType",
+            "rootCause",
+            "proposedFix",
+            "closedDate",
+            "targetDate",
+            "externalReference",
+            "resolvedReason",
+            "areaPath",
+            "assignedTo",
+        ];
+        const missingAdoRefs = requiredAdoRefKeys
+            .filter(key => !adoFieldRefs[key]);
 
         if (missingAdoRefs.length) {
             emitFriendlyFailure({
@@ -305,11 +377,24 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         return true;
     }
 
+    function stripEmbeddedAdoLinkText(value) {
+        if (!value) {
+            return "";
+        }
+
+        return String(value)
+            .replace(/(?:Link to Azure DevOps:\s*https?:\/\/\S+\s*Repro steps:\s*)+/gi, "")
+            .replace(/(?:Link to Azure DevOps:\s*https?:\/\/\S+\s*)+/gi, "")
+            .replace(/^(?:Repro steps:\s*)+/i, "")
+            .trim();
+    }
+
     function buildDefectDescription(eventData) {
         const fields = getFields(eventData);
-        return `Link to Azure DevOps: ${eventData.resource._links.html.href}
-                Repro steps: 
-                ${htmlToPlainText(getAdoFieldValue(fields, adoFieldRefs.reproSteps))}`;
+        const reproSteps = stripEmbeddedAdoLinkText(
+            htmlToPlainText(getAdoFieldValue(fields, adoFieldRefs.reproSteps))
+        );
+        return reproSteps;
     }
 
     function buildDefectSummary(namePrefix, eventData) {
@@ -344,13 +429,17 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         return normalizeText(value);
     }
 
-    function normalizeAdoStatusForQtest(status) {
-        const mapping = {
-            Active: "In Analysis",
-            Cancelled: "Rejected",
-        };
+    function mapAdoStatusToQtestLabel(status) {
+        const normalizedStatus = normalizeText(status);
+        if (!normalizedStatus) {
+            return "";
+        }
 
-        return mapping[status] || status;
+        if (["active", "cancelled"].includes(normalizeLabel(normalizedStatus))) {
+            return null;
+        }
+
+        return normalizedStatus;
     }
 
     function mapAdoSeverityToQtestValue(adoSeverity) {
@@ -564,6 +653,10 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         defectToUpdate,
         summary,
         description,
+        linkFieldId,
+        linkValue,
+        applicationValue,
+        siteNameValue,
         severityValue,
         priorityValue,
         rootCauseValue,
@@ -596,6 +689,32 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             ],
         };
 
+        if (linkFieldId && linkValue) {
+            const parsedLinkFieldId = parseInt(linkFieldId, 10);
+            requestBody.properties.push({
+                field_id: Number.isNaN(parsedLinkFieldId) ? linkFieldId : parsedLinkFieldId,
+                field_value: linkValue,
+            });
+        }
+
+        if (applicationValue !== null && applicationValue !== undefined && applicationValue !== "") {
+            const parsedApplicationValue = parseInt(applicationValue, 10);
+            const parsedApplicationFieldId = parseInt(DEFECT_APPLICATION_FIELD_ID, 10);
+            requestBody.properties.push({
+                field_id: Number.isNaN(parsedApplicationFieldId) ? DEFECT_APPLICATION_FIELD_ID : parsedApplicationFieldId,
+                field_value: Number.isNaN(parsedApplicationValue) ? applicationValue : parsedApplicationValue,
+            });
+        }
+
+        if (siteNameValue !== null && siteNameValue !== undefined && siteNameValue !== "") {
+            const parsedSiteNameValue = parseInt(siteNameValue, 10);
+            const parsedSiteNameFieldId = parseInt(DEFECT_SITE_NAME_FIELD_ID, 10);
+            requestBody.properties.push({
+                field_id: Number.isNaN(parsedSiteNameFieldId) ? DEFECT_SITE_NAME_FIELD_ID : parsedSiteNameFieldId,
+                field_value: Number.isNaN(parsedSiteNameValue) ? siteNameValue : parsedSiteNameValue,
+            });
+        }
+
         if (severityValue) {
             requestBody.properties.push({
                 field_id: constants.DefectSeverityFieldID,
@@ -610,14 +729,13 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             });
         }
 
-        if (constants.DefectRootCauseFieldID) {
+        if (constants.DefectRootCauseFieldID && rootCauseValue !== null && rootCauseValue !== undefined && rootCauseValue !== "") {
             const parsedRootCauseValue = parseInt(rootCauseValue, 10);
             requestBody.properties.push({
                 field_id: constants.DefectRootCauseFieldID,
-                field_value: rootCauseValue
-                    ? (Number.isNaN(parsedRootCauseValue) ? rootCauseValue : parsedRootCauseValue)
-                    : "",
+                field_value: Number.isNaN(parsedRootCauseValue) ? rootCauseValue : parsedRootCauseValue,
             });
+            console.log(`[Info] Added Root Cause '${rootCauseValue}' to qTest update payload.`);
         }
 
         if (defectTypeValue) {
@@ -636,6 +754,8 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
                 field_value: parseInt(statusValue, 10),
             });
             console.log(`[Info] Added Status '${statusValue}' to qTest update payload.`);
+        } else if (["active", "cancelled"].includes(normalizeLabel(adoState))) {
+            console.log(`[Info] Intentionally skipped qTest Status update for ADO State '${adoState}' pending business confirmation.`);
         } else {
             console.log(`[Warn] No Status mapping found or ADO state '${adoState}' not mapped.`);
         }
@@ -825,6 +945,23 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const defectContext = defectToUpdate
         ? { id: defectToUpdate.id, pid: defectToUpdate.pid }
         : null;
+    const adoLinkValue = normalizeText(event?.resource?._links?.html?.href);
+    const qtestLinkFieldId = normalizeText(constants.DefectLinkToAzureDevOpsFieldID)
+        || String(await getDefectFieldIdByLabel(DEFECT_LINK_TO_AZURE_DEVOPS_LABEL) || "");
+    let linkFieldWarningDetails = null;
+
+    if (adoLinkValue && !qtestLinkFieldId) {
+        linkFieldWarningDetails = {
+            platform: "qTest",
+            objectType: "Defect",
+            objectId: defectContext?.id ?? workItemId,
+            objectPid: defectContext?.pid,
+            fieldName: DEFECT_LINK_TO_AZURE_DEVOPS_LABEL,
+            fieldValue: adoLinkValue,
+            detail: `qTest field '${DEFECT_LINK_TO_AZURE_DEVOPS_LABEL}' was not found. Azure DevOps link sync was skipped.`,
+            dedupKey: `warning:link-field:${defectContext?.id ?? workItemId}`,
+        };
+    }
 
     const adoAreaPath = getAdoFieldValue(fields, adoFieldRefs.areaPath);
     console.log(`[Info] ADO AreaPath value: '${adoAreaPath}'`);
@@ -955,29 +1092,47 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
     const adoState = getAdoFieldValue(fields, adoFieldRefs.state);
     console.log(`[Info] ADO State value: '${adoState}'`);
-    const qtestStatusLabel = normalizeAdoStatusForQtest(adoState);
-
-    const qtestStatusValue = await resolveDefectFieldValue(
-        constants.DefectStatusFieldID,
-        qtestStatusLabel,
-        "Status",
-        defectContext
-    );
-    console.log(`[Info] Mapped ADO State '${adoState}' to qTest Status label '${qtestStatusLabel}' and qTest Status value '${qtestStatusValue}'`);
-    if (!qtestStatusValue) {
-        console.log(`[Warn] ADO State '${adoState}' does not match any defined qTest status.`);
+    const qtestStatusLabel = mapAdoStatusToQtestLabel(adoState);
+    let qtestStatusValue = null;
+    if (qtestStatusLabel === null) {
+        console.log(`[Info] Skipping qTest status update for ADO State '${adoState}' pending business confirmation.`);
+    } else {
+        qtestStatusValue = await resolveDefectFieldValue(
+            constants.DefectStatusFieldID,
+            qtestStatusLabel,
+            "Status",
+            defectContext
+        );
+        console.log(`[Info] Mapped ADO State '${adoState}' to qTest Status label '${qtestStatusLabel}' and qTest Status value '${qtestStatusValue}'`);
+        if (!qtestStatusValue) {
+            console.log(`[Warn] ADO State '${adoState}' does not match any defined qTest status.`);
+        }
     }
 
+    const adoRootCauseRaw = adoFieldRefs.rootCause ? fields?.[adoFieldRefs.rootCause] : "";
+    const adoRootCauseFormatted = adoFieldRefs.rootCause
+        ? fields?.[`${adoFieldRefs.rootCause}@OData.Community.Display.V1.FormattedValue`]
+        : "";
     const adoRootCause = getAdoFieldValue(fields, adoFieldRefs.rootCause, { preferFormatted: true });
-    console.log(`[Info] ADO Root Cause value: '${adoRootCause}'`);
+    console.log(`[Debug] ADO Root Cause diagnostics: ${safeJson({
+        fieldRef: adoFieldRefs.rootCause,
+        raw: adoRootCauseRaw,
+        formatted: adoRootCauseFormatted,
+        selected: adoRootCause,
+    })}`);
 
-    const qtestRootCauseValue = await resolveDefectFieldValue(
+    const qtestRootCauseResult = await resolveOptionalDefectFieldValue(
         constants.DefectRootCauseFieldID,
         adoRootCause,
         "Root Cause",
         defectContext
     );
-    console.log(`[Info] Mapped ADO Root Cause '${adoRootCause}' to qTest Root Cause value '${qtestRootCauseValue}'`);
+    const qtestRootCauseValue = qtestRootCauseResult.value;
+    if (qtestRootCauseValue) {
+        console.log(`[Info] Mapped ADO Root Cause '${adoRootCause}' to qTest Root Cause value '${qtestRootCauseValue}'`);
+    } else if (adoRootCause) {
+        console.log(`[Warn] ADO Root Cause '${adoRootCause}' could not be mapped to qTest. Root Cause update will be skipped.`);
+    }
 
     const adoProposedFix = getAdoFieldValue(fields, adoFieldRefs.proposedFix);
     console.log(`[Info] ADO Proposed Fix value length: ${adoProposedFix.length}`);
@@ -1015,11 +1170,51 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     );
     console.log(`[Info] Mapped ADO Resolved Reason '${adoResolvedReason}' → qTest value '${qtestResolvedReasonValue}'`);
 
+    const adoApplication = adoFieldRefs.application
+        ? getAdoFieldValue(fields, adoFieldRefs.application, { preferFormatted: true })
+        : "";
+    console.log(`[Info] ADO Application value: '${adoApplication}'`);
+
+    const qtestApplicationResult = await resolveOptionalDefectFieldValue(
+        DEFECT_APPLICATION_FIELD_ID,
+        adoApplication,
+        "Application",
+        defectContext
+    );
+    const qtestApplicationValue = qtestApplicationResult.value;
+    if (qtestApplicationValue) {
+        console.log(`[Info] Mapped ADO Application '${adoApplication}' to qTest Application value '${qtestApplicationValue}'`);
+    } else if (adoApplication) {
+        console.log(`[Warn] ADO Application '${adoApplication}' could not be mapped to qTest. Application update will be skipped.`);
+    }
+
+    const adoSiteName = adoFieldRefs.siteName
+        ? getAdoFieldValue(fields, adoFieldRefs.siteName, { preferFormatted: true })
+        : "";
+    console.log(`[Info] ADO Site Name value: '${adoSiteName}'`);
+
+    const qtestSiteNameResult = await resolveOptionalDefectFieldValue(
+        DEFECT_SITE_NAME_FIELD_ID,
+        adoSiteName,
+        "Site Name",
+        defectContext
+    );
+    const qtestSiteNameValue = qtestSiteNameResult.value;
+    if (qtestSiteNameValue) {
+        console.log(`[Info] Mapped ADO Site Name '${adoSiteName}' to qTest Site Name value '${qtestSiteNameValue}'`);
+    } else if (adoSiteName) {
+        console.log(`[Warn] ADO Site Name '${adoSiteName}' could not be mapped to qTest. Site Name update will be skipped.`);
+    }
+
     if (defectToUpdate) {
         const updateSucceeded = await updateDefect(
             defectToUpdate,
             defectSummary,
             defectDescription,
+            qtestLinkFieldId,
+            adoLinkValue,
+            qtestApplicationValue,
+            qtestSiteNameValue,
             qtestSeverityValue,
             qtestPriorityValue,
             qtestRootCauseValue,
@@ -1037,12 +1232,28 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         );
 
         if (updateSucceeded) {
+            if (linkFieldWarningDetails) {
+                emitFriendlyWarning(linkFieldWarningDetails);
+            }
+
             if (assignedToWarningDetails) {
                 emitFriendlyWarning(assignedToWarningDetails);
             }
 
             if (assignedToTeamWarningDetails) {
                 emitFriendlyWarning(assignedToTeamWarningDetails);
+            }
+
+            if (qtestRootCauseResult.warningDetails) {
+                emitFriendlyWarning(qtestRootCauseResult.warningDetails);
+            }
+
+            if (qtestApplicationResult.warningDetails) {
+                emitFriendlyWarning(qtestApplicationResult.warningDetails);
+            }
+
+            if (qtestSiteNameResult.warningDetails) {
+                emitFriendlyWarning(qtestSiteNameResult.warningDetails);
             }
         }
     }
