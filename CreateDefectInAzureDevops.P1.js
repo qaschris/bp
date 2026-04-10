@@ -804,7 +804,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             });
             console.log(`[Info] Added Root Cause to ADO: ${qtestRootCause}`);
         } else {
-            console.log(`[Info] Skipping Root Cause â€” no value in qTest`);
+            console.log(`[Info] Skipping Root Cause — no value in qTest`);
         }
 
         if (qtestProposedFix) {
@@ -815,7 +815,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             });
             console.log(`[Info] Added Proposed Fix to ADO.`);
         } else {
-            console.log(`[Info] Skipping Proposed Fix â€” no value in qTest`);
+            console.log(`[Info] Skipping Proposed Fix — no value in qTest`);
         }
 
         if (qtestClosedDate) {
