@@ -3,74 +3,12 @@ const axios = require("axios");
 
 exports.handler = async function ({ event, constants, triggers }, context, callback) {
     const qtestMetadataCache = {};
+    let failureReported = false;
+    const emittedMessageKeys = new Set();
+    let adoFieldRefs = null;
 
     const DEFAULT_AREA_PATH = constants.AreaPath;
-    const DEFAULT_ASSIGNED_TO_TEAM_VALUE = 1363; // Default to "Tool Chain" team in qTest if no mapping found
-
-    const AREA_PATH_TO_QTEST_TEAM_VALUE = {
-        "bp_Quantum\\Process\\Asset Management\\Squad 1 - Data": 1,
-        "bp_Quantum\\Process\\Asset Management\\AM - Work Mgmt Core": 2,
-        "bp_Quantum\\Process\\Finance\\Finance - Capex Squad": 3,
-        "bp_Quantum\\Process\\Finance\\Finance - CB Hub 2.0 Squad": 4,
-        "bp_Quantum\\Process\\Finance\\Finance - R2R Squad": 6,
-        "bp_Quantum\\Process\\Finance\\Finance - Tax Squad": 7,
-        "bp_Quantum\\Process\\Procurement\\Invoice to Pay": 8,
-        "bp_Quantum\\Process\\Procurement\\Quality and Logistics": 9,
-        "bp_Quantum\\Process\\Procurement\\Services Procurement": 10,
-        "bp_Quantum\\Process\\Procurement\\Materials Procurement": 11,
-        "bp_Quantum\\Process\\Procurement\\Source to Contract": 12,
-        "bp_Quantum\\Process\\Procurement\\Materials and Inventory": 13,
-        "bp_Quantum\\Process\\MDG\\Asset Management": 14,
-        "bp_Quantum\\Process\\MDG\\Procurement": 15,
-        "bp_Quantum\\Process\\MDG\\Finance": 16,
-        "bp_Quantum\\Process\\MDG\\Material": 17,
-        "bp_Quantum\\Data and Analytics\\ETL\\Asset Management": 18,
-        "bp_Quantum\\Data and Analytics\\ETL\\Customer Management": 19,
-        "bp_Quantum\\Data and Analytics\\ETL\\Finance": 20,
-        "bp_Quantum\\Data and Analytics\\ETL\\Material Master": 1320,
-        "bp_Quantum\\Data and Analytics\\ETL\\Procurement": 21,
-        "bp_Quantum\\Data and Analytics\\Reporting and Analytics\\Asset Management (R and A)": 89,
-        "bp_Quantum\\Data and Analytics\\Reporting and Analytics\\Finance (R and A)": 90,
-        "bp_Quantum\\Technical\\Dev and Integration\\Asset Management": 1185,
-        "bp_Quantum\\Data and Analytics\\Reporting and Analytics\\Procurement (R and A)": 1184,
-        "bp_Quantum\\Technical\\Dev and Integration\\Finance": 1186,
-        "bp_Quantum\\Technical\\Dev and Integration\\Integration": 1187,
-        "bp_Quantum\\Technical\\Dev and Integration\\Procurement": 1188,
-        "bp_Quantum\\Technical\\Testing": 1189,
-        "bp_Quantum\\Technical\\Cutover and Release Management": 1193,
-        "bp_Quantum\\Technical\\Architecture": 1195,
-        "bp_Quantum\\Technical\\Digital Security and Compliance\\Asset Management": 1194,
-        "bp_Quantum\\Technical\\Digital Security and Compliance\\Finance": 1211,
-        "bp_Quantum\\Technical\\Digital Security and Compliance\\Procurement": 1212,
-        "bp_Quantum\\Technical\\Digital Security and Compliance\\MDG": 1213,
-        "bp_Quantum\\Technical\\Digital Security and Compliance\\Cross - Entity": 1214,
-        "bp_Quantum\\Technical\\Identity and Access Management\\Asset Management": 1215,
-        "bp_Quantum\\Technical\\Identity and Access Management\\Finance": 1216,
-        "bp_Quantum\\Technical\\Identity and Access Management\\Procurement": 1217,
-        "bp_Quantum\\Technical\\Identity and Access Management\\MDG": 1218,
-        "bp_Quantum\\Technical\\Identity and Access Management\\Cross - Entity": 1219,
-        "bp_Quantum\\Technical\\Platforms\\BW4": 1220,
-        "bp_Quantum\\Technical\\Platforms\\C and P": 1221,
-        "bp_Quantum\\Technical\\Platforms\\CB": 1222,
-        "bp_Quantum\\Technical\\Platforms\\CFIN or Core": 1223,
-        "bp_Quantum\\Technical\\Platforms\\MDG": 1224,
-        "bp_Quantum\\Technical\\Platforms\\P and O": 1225,
-        "bp_Quantum\\Process\\Finance\\Finance - ARAPINTERCO Squad": 1314,
-        "bp_Quantum\\Data and Analytics\\ETL\\Site Castellon": 1332,
-        "bp_Quantum\\Data and Analytics\\ETL\\Site Kwinana": 1334,
-        "bp_Quantum\\Data and Analytics\\ETL\\Site Whiting": 1335,
-        "bp_Quantum\\Data and Analytics\\ETL\\Site Global": 1348,
-        "bp_Quantum\\Data and Analytics\\ETL\\Data office": 1349,
-        "bp_Quantum\\Technical\\Platforms\\Shared\\BTP or SaaS": 1354,
-        "bp_Quantum\\Technical\\Platforms\\Shared\\GRC": 1355,
-        "bp_Quantum\\Technical\\Platforms\\Shared\\OpenText": 1356,
-        "bp_Quantum\\Technical\\Platforms\\Shared\\TL or Architecture or GRC": 1357,
-        "bp_Quantum\\Technical\\Tool Chain": 1363
-    };
-
-    const QTEST_TEAM_VALUE_TO_AREA_PATH = Object.fromEntries(
-        Object.entries(AREA_PATH_TO_QTEST_TEAM_VALUE).map(([label, value]) => [String(value), label])
-    );
+    const DEFAULT_QTEST_ASSIGNED_TO_IDENTITY = "ado-qtest-svc@bp.com";
 
     const standardHeaders = {
         "Content-Type": "application/json",
@@ -88,8 +26,17 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             : `https://${raw}`;
     }
 
+    function normalizeText(value) {
+        return value == null
+            ? ""
+            : String(value)
+                .normalize("NFKC")
+                .replace(/[\u200B-\u200D\uFEFF]/g, "")
+                .trim();
+    }
+
     function normalizeLabel(value) {
-        return value == null ? "" : String(value).trim().toLowerCase();
+        return normalizeText(value).replace(/\s+/g, " ").toLowerCase();
     }
 
     function normalizeFieldResponse(data) {
@@ -99,9 +46,10 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         return [];
     }
 
-    function getAllowedValues(fieldDefinition) {
+    function getAllowedValues(fieldDefinition, options = {}) {
+        const includeInactive = options.includeInactive === true;
         return Array.isArray(fieldDefinition?.allowed_values)
-            ? fieldDefinition.allowed_values.filter(v => v?.is_active !== false)
+            ? fieldDefinition.allowed_values.filter(v => includeInactive || v?.is_active !== false)
             : [];
     }
 
@@ -120,7 +68,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         return fields;
     }
 
-    async function resolveFieldValue(fieldId, rawValue, objectType) {
+    async function resolveFieldValue(fieldId, rawValue, objectType, options = {}) {
         if (rawValue === undefined || rawValue === null || rawValue === "") {
             return null;
         }
@@ -136,7 +84,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             return rawValue;
         }
 
-        const allowedValues = getAllowedValues(fieldDefinition);
+        const allowedValues = getAllowedValues(fieldDefinition, options);
         const normalizedRawValue = normalizeLabel(rawValue);
 
         const exactValueMatch = allowedValues.find(option => String(option?.value) === String(rawValue));
@@ -197,7 +145,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         }
 
         try {
-            return await resolveFieldValue(fieldId, rawValue, "defects");
+            return await resolveFieldValue(fieldId, rawValue, "defects", options);
         } catch (error) {
             if (options.emitFailure !== false) {
                 emitFriendlyFailure({
@@ -212,6 +160,86 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             }
             throw error;
         }
+    }
+
+    function buildAdoFieldRefs() {
+        return {
+            title: normalizeText(constants.AzDoTitleFieldRef),
+            reproSteps: normalizeText(constants.AzDoReproStepsFieldRef),
+            state: normalizeText(constants.AzDoStateFieldRef),
+            severity: normalizeText(constants.AzDoSeverityFieldRef),
+            priority: normalizeText(constants.AzDoPriorityFieldRef),
+            defectType: normalizeText(constants.AzDoDefectTypeFieldRef),
+            rootCause: normalizeText(constants.AzDoRootCauseFieldRef),
+            proposedFix: normalizeText(constants.AzDoProposedFixFieldRef),
+            closedDate: normalizeText(constants.AzDoClosedDateFieldRef),
+            targetDate: normalizeText(constants.AzDoTargetDateFieldRef),
+            externalReference: normalizeText(constants.AzDoExternalReferenceFieldRef),
+            resolvedReason: normalizeText(constants.AzDoResolvedReasonFieldRef),
+            areaPath: normalizeText(constants.AzDoAreaPathFieldRef),
+            assignedTo: normalizeText(constants.AzDoAssignedToFieldRef),
+        };
+    }
+
+    function validateRequiredConfiguration() {
+        const missingQtestConstants = [
+            "DefectSummaryFieldID",
+            "DefectDescriptionFieldID",
+            "DefectSeverityFieldID",
+            "DefectPriorityFieldID",
+            "DefectTypeFieldID",
+            "DefectStatusFieldID",
+            "DefectRootCauseFieldID",
+            "DefectExternalReferenceFieldID",
+            "DefectResolvedReasonFieldID",
+            "DefectAssignedToFieldID",
+            "DefectAssignedToTeamFieldID",
+            "DefectTargetDateFieldID",
+        ].filter(name => !normalizeText(constants[name]));
+
+        if (missingQtestConstants.length) {
+            emitFriendlyFailure({
+                platform: "Pulse",
+                objectType: "Configuration",
+                objectId: "Unknown",
+                fieldName: missingQtestConstants.join(", "),
+                detail: "Required qTest defect field constants are missing in Pulse.",
+                dedupKey: `config:qtest:${missingQtestConstants.join("|")}`,
+            });
+            return false;
+        }
+
+        adoFieldRefs = buildAdoFieldRefs();
+        const missingAdoRefs = Object.entries(adoFieldRefs)
+            .filter(([, value]) => !value)
+            .map(([key]) => key);
+
+        if (missingAdoRefs.length) {
+            emitFriendlyFailure({
+                platform: "Pulse",
+                objectType: "Configuration",
+                objectId: "Unknown",
+                fieldName: missingAdoRefs.join(", "),
+                detail: "Required Azure DevOps field reference constants are missing in Pulse.",
+                dedupKey: `config:ado:${missingAdoRefs.join("|")}`,
+            });
+            return false;
+        }
+
+        return true;
+    }
+
+    function getAdoFieldValue(fields, fieldRef, options = {}) {
+        if (!fieldRef) {
+            return "";
+        }
+
+        const formattedKey = `${fieldRef}@OData.Community.Display.V1.FormattedValue`;
+        const value = options.preferFormatted
+            ? fields?.[formattedKey] ?? fields?.[fieldRef]
+            : fields?.[fieldRef] ?? fields?.[formattedKey];
+
+        return value == null ? "" : value;
     }
 
     const eventType = {
@@ -240,8 +268,16 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         const message =
             `Sync failed. Platform: ${platform}. Object Type: ${objectType}. Object ID: ${objectId}.${objectPid}${fieldName}${fieldValue} Detail: ${detail}`;
 
+        const dedupKey = details.dedupKey || `failure|${message}`;
+        if (emittedMessageKeys.has(dedupKey)) {
+            return false;
+        }
+
+        emittedMessageKeys.add(dedupKey);
+        failureReported = true;
         console.error(`[Error] ${message}`);
         emitEvent('ChatOpsEvent', { message });
+        return true;
     }
 
     function emitFriendlyWarning(details = {}) {
@@ -258,20 +294,27 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         const message =
             `Sync warning. Platform: ${platform}. Object Type: ${objectType}. Object ID: ${objectId}.${objectPid}${fieldName}${fieldValue} Detail: ${detail}`;
 
+        const dedupKey = details.dedupKey || `warning|${message}`;
+        if (emittedMessageKeys.has(dedupKey)) {
+            return false;
+        }
+
+        emittedMessageKeys.add(dedupKey);
         console.log(`[Warn] ${message}`);
         emitEvent('ChatOpsEvent', { message });
+        return true;
     }
 
     function buildDefectDescription(eventData) {
         const fields = getFields(eventData);
         return `Link to Azure DevOps: ${eventData.resource._links.html.href}
                 Repro steps: 
-                ${htmlToPlainText(fields["Microsoft.VSTS.TCM.ReproSteps"])}`;
+                ${htmlToPlainText(getAdoFieldValue(fields, adoFieldRefs.reproSteps))}`;
     }
 
     function buildDefectSummary(namePrefix, eventData) {
         const fields = getFields(eventData);
-        return `${namePrefix}${fields["System.Title"]}`;
+        return `${namePrefix}${getAdoFieldValue(fields, adoFieldRefs.title)}`;
     }
 
     function getFields(eventData) {
@@ -298,7 +341,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     }
 
     function normalizeAreaPathLabel(value) {
-        return typeof value === "string" ? value.trim() : "";
+        return normalizeText(value);
     }
 
     function normalizeAdoStatusForQtest(status) {
@@ -334,70 +377,60 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
     async function mapAreaPathToQtestTeamValue(areaPath, defectContext = null) {
         const label = normalizeAreaPathLabel(areaPath);
+        const fallbackAreaPath = normalizeAreaPathLabel(DEFAULT_AREA_PATH);
+        const candidates = [];
+
         if (label) {
+            candidates.push({ label, usedDefault: false });
+        }
+
+        if (fallbackAreaPath && normalizeLabel(fallbackAreaPath) !== normalizeLabel(label)) {
+            candidates.push({ label: fallbackAreaPath, usedDefault: true });
+        }
+
+        for (const candidate of candidates) {
             try {
                 const resolvedValue = await resolveDefectFieldValue(
                     constants.DefectAssignedToTeamFieldID,
-                    label,
+                    candidate.label,
                     "Assigned to Team",
                     defectContext,
                     { emitFailure: false }
                 );
+
                 return {
                     value: resolvedValue,
-                    usedDefault: false,
+                    usedDefault: candidate.usedDefault,
+                    warningValue: label || "(blank)",
+                    warningDetail: candidate.usedDefault
+                        ? `ADO AreaPath '${label || "(blank)"}' could not be resolved to qTest Assigned to Team. Defaulted to area path '${candidate.label}'.`
+                        : "",
                 };
             } catch (error) {
-                console.log(`[Warn] Area Path '${label}' could not be resolved in qTest. Attempting default area path '${DEFAULT_AREA_PATH}'.`);
+                console.log(
+                    `[Warn] Area Path '${candidate.label}' could not be resolved in qTest Assigned to Team.`
+                );
             }
         }
 
-        if (!DEFAULT_AREA_PATH) {
+        const warningValue = label || "(blank)";
+        if (fallbackAreaPath) {
             return {
-                value: DEFAULT_ASSIGNED_TO_TEAM_VALUE,
+                value: null,
                 usedDefault: true,
-                warningValue: label || "(blank)",
+                warningValue,
                 warningDetail:
-                    `ADO AreaPath '${label || "(blank)"}' could not be resolved to qTest Assigned to Team. ` +
-                    `Defaulted to configured team value '${DEFAULT_ASSIGNED_TO_TEAM_VALUE}'.`,
+                    `ADO AreaPath '${warningValue}' could not be resolved to qTest Assigned to Team, and the configured default area path '${fallbackAreaPath}' could not be resolved either. Assigned to Team was left unchanged.`,
             };
         }
 
-        try {
-            const fallbackValue = await resolveDefectFieldValue(
-                constants.DefectAssignedToTeamFieldID,
-                DEFAULT_AREA_PATH,
-                "Assigned to Team",
-                defectContext,
-                { emitFailure: false }
-            );
-            console.log(`[Info] Using default team value '${fallbackValue}' for default area path '${DEFAULT_AREA_PATH}'.`);
-            return {
-                value: fallbackValue,
-                usedDefault: true,
-                warningValue: label || "(blank)",
-                warningDetail:
-                    `ADO AreaPath '${label || "(blank)"}' could not be resolved to qTest Assigned to Team. ` +
-                    `Defaulted to area path '${DEFAULT_AREA_PATH}'.`,
-            };
-        } catch (error) {
-            console.log(
-                `[Warn] Default area path '${DEFAULT_AREA_PATH}' could not be resolved dynamically. ` +
-                `Falling back to configured default team value '${DEFAULT_ASSIGNED_TO_TEAM_VALUE}'.`
-            );
-            return {
-                value: DEFAULT_ASSIGNED_TO_TEAM_VALUE,
-                usedDefault: true,
-                warningValue: label || "(blank)",
-                warningDetail:
-                    `ADO AreaPath '${label || "(blank)"}' could not be resolved to qTest Assigned to Team. ` +
-                    `Default area path '${DEFAULT_AREA_PATH}' could not be resolved dynamically, so the configured team value '${DEFAULT_ASSIGNED_TO_TEAM_VALUE}' was used.`,
-            };
-        }
-    }
-
-    function mapQtestTeamValueToAreaPath(valueId) {
-        return QTEST_TEAM_VALUE_TO_AREA_PATH[String(valueId)] || DEFAULT_AREA_PATH;
+        return {
+            value: null,
+            usedDefault: true,
+            warningValue,
+            warningDetail:
+                `ADO AreaPath '${warningValue}' could not be resolved to qTest Assigned to Team, and no default area path is configured. Assigned to Team was left unchanged.`,
+        };
     }
 
     function extractUpnOrEmailFromAdoAssignedTo(raw) {
@@ -438,13 +471,14 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             return response.data?.comments || [];
         } catch (error) {
             console.error(`[Error] Failed to fetch ADO comments: ${error.message}`);
-            emitFriendlyFailure({
+            emitFriendlyWarning({
                 platform: "ADO",
                 objectType: "Defect",
-                objectId: defectContext?.id ?? workItemId,
+                objectId: workItemId,
                 objectPid: defectContext?.pid,
                 fieldName: "Discussion",
-                detail: "Unable to retrieve comments from Azure DevOps."
+                detail: "Unable to retrieve comments from Azure DevOps. Discussion sync was skipped.",
+                dedupKey: `warning:comments:${workItemId}`,
             });
             return [];
         }
@@ -577,9 +611,12 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         }
 
         if (constants.DefectRootCauseFieldID) {
+            const parsedRootCauseValue = parseInt(rootCauseValue, 10);
             requestBody.properties.push({
                 field_id: constants.DefectRootCauseFieldID,
-                field_value: rootCauseValue || "",
+                field_value: rootCauseValue
+                    ? (Number.isNaN(parsedRootCauseValue) ? rootCauseValue : parsedRootCauseValue)
+                    : "",
             });
         }
 
@@ -629,9 +666,12 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         }
 
         if (constants.DefectResolvedReasonFieldID && resolvedReasonValue) {
+            const parsedResolvedReasonValue = parseInt(resolvedReasonValue, 10);
             requestBody.properties.push({
                 field_id: constants.DefectResolvedReasonFieldID,
-                field_value: parseInt(resolvedReasonValue, 10),
+                field_value: Number.isNaN(parsedResolvedReasonValue)
+                    ? resolvedReasonValue
+                    : parsedResolvedReasonValue,
             });
             console.log(`[Info] Added Resolved Reason '${resolvedReasonValue}' to qTest update payload.`);
         } else {
@@ -682,6 +722,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         try {
             await put(url, requestBody);
             console.log(`[Info] Defect '${defectId}' (${defectPid}) updated.`);
+            return true;
         } catch (error) {
             console.error(`[Error] Failed to update defect '${defectId}'.`, error);
             emitFriendlyFailure({
@@ -691,6 +732,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
                 objectPid: defectPid,
                 detail: "Unable to update the qTest defect from Azure DevOps."
             });
+            return false;
         }
     }
 
@@ -772,6 +814,10 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             return;
     }
 
+    if (!validateRequiredConfiguration()) {
+        return;
+    }
+
     const namePrefix = getNamePrefix(workItemId);
     const defectDescription = buildDefectDescription(event);
     const defectSummary = buildDefectSummary(namePrefix, event);
@@ -780,17 +826,18 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         ? { id: defectToUpdate.id, pid: defectToUpdate.pid }
         : null;
 
-    const adoAreaPath = fields[constants.AzDoAreaPathFieldRef || "System.AreaPath"] || "";
+    const adoAreaPath = getAdoFieldValue(fields, adoFieldRefs.areaPath);
     console.log(`[Info] ADO AreaPath value: '${adoAreaPath}'`);
 
     const qtestAssignedToTeamResult = await mapAreaPathToQtestTeamValue(adoAreaPath, defectContext);
     const qtestAssignedToTeamValue = qtestAssignedToTeamResult.value;
+    let assignedToTeamWarningDetails = null;
     console.log(
-        `[Info] Mapped ADO AreaPath '${adoAreaPath || "(blank)"}' to qTest Assigned to Team value '${qtestAssignedToTeamValue}'`
+        `[Info] Mapped ADO AreaPath '${adoAreaPath || "(blank)"}' to qTest Assigned to Team value '${qtestAssignedToTeamValue || "(unchanged)"}'`
     );
 
-    if (qtestAssignedToTeamResult.usedDefault) {
-        emitFriendlyWarning({
+    if (qtestAssignedToTeamResult.warningDetail) {
+        assignedToTeamWarningDetails = {
             platform: "qTest",
             objectType: "Defect",
             objectId: defectContext?.id ?? workItemId,
@@ -798,7 +845,8 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             fieldName: "Assigned to Team",
             fieldValue: qtestAssignedToTeamResult.warningValue,
             detail: qtestAssignedToTeamResult.warningDetail,
-        });
+            dedupKey: `warning:assigned-to-team:${defectContext?.id ?? workItemId}:${normalizeLabel(qtestAssignedToTeamResult.warningValue)}`,
+        };
     }
 
     let adoComments = await getAdoComments(workItemId, defectContext);
@@ -818,8 +866,9 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
                     `;
     }
 
-    const adoAssignedToRaw = fields[constants.AzDoAssignedToFieldRef || "System.AssignedTo"];
+    const adoAssignedToRaw = getAdoFieldValue(fields, adoFieldRefs.assignedTo);
     const adoAssignedToIdentity = extractUpnOrEmailFromAdoAssignedTo(adoAssignedToRaw);
+    let assignedToWarningDetails = null;
 
     let qtestAssignedToUserId = null;
     if (adoAssignedToIdentity) {
@@ -832,7 +881,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         } else {
             console.log(
                 `[Warn] Could not resolve ADO Assigned To '${adoAssignedToIdentity}' in qTest. ` +
-                `Will clear qTest assignment (Blank).`
+                `Attempting fallback to '${DEFAULT_QTEST_ASSIGNED_TO_IDENTITY}'.`
             );
         }
     } else if (adoAssignedToRaw) {
@@ -841,19 +890,59 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         console.log(`[Info] ADO Assigned To is blank/unassigned.`);
     }
 
-    const adoSeverity = fields["Microsoft.VSTS.Common.Severity"];
-        console.log(`[Info] ADO Severity value: '${adoSeverity}'`);
+    if (!qtestAssignedToUserId && adoAssignedToRaw) {
+        qtestAssignedToUserId = await resolveQtestUserIdByUsernameOrUpn(DEFAULT_QTEST_ASSIGNED_TO_IDENTITY, standardHeaders);
+
+        if (qtestAssignedToUserId) {
+            console.log(
+                `[Info] Falling back qTest Assigned To to '${DEFAULT_QTEST_ASSIGNED_TO_IDENTITY}' ` +
+                `with userId '${qtestAssignedToUserId}'.`
+            );
+            assignedToWarningDetails = {
+                platform: "qTest",
+                objectType: "Defect",
+                objectId: defectContext?.id ?? workItemId,
+                objectPid: defectContext?.pid,
+                fieldName: "Assigned To",
+                fieldValue: adoAssignedToIdentity || normalizeText(adoAssignedToRaw) || "(blank)",
+                detail:
+                    `ADO Assigned To '${adoAssignedToIdentity || normalizeText(adoAssignedToRaw) || "(blank)"}' could not be resolved in qTest. ` +
+                    `Defaulted qTest Assigned To to '${DEFAULT_QTEST_ASSIGNED_TO_IDENTITY}'.`,
+                dedupKey: `warning:assigned-to:${defectContext?.id ?? workItemId}:${normalizeLabel(adoAssignedToIdentity || adoAssignedToRaw || "(blank)")}`,
+            };
+        } else {
+            console.log(
+                `[Warn] Fallback qTest Assigned To identity '${DEFAULT_QTEST_ASSIGNED_TO_IDENTITY}' ` +
+                `was not found in the qTest project. Assignment will be cleared.`
+            );
+            assignedToWarningDetails = {
+                platform: "qTest",
+                objectType: "Defect",
+                objectId: defectContext?.id ?? workItemId,
+                objectPid: defectContext?.pid,
+                fieldName: "Assigned To",
+                fieldValue: adoAssignedToIdentity || normalizeText(adoAssignedToRaw) || "(blank)",
+                detail:
+                    `ADO Assigned To '${adoAssignedToIdentity || normalizeText(adoAssignedToRaw) || "(blank)"}' could not be resolved in qTest, ` +
+                    `and fallback user '${DEFAULT_QTEST_ASSIGNED_TO_IDENTITY}' was not found in the qTest project. Assigned To was cleared.`,
+                dedupKey: `warning:assigned-to-clear:${defectContext?.id ?? workItemId}:${normalizeLabel(adoAssignedToIdentity || adoAssignedToRaw || "(blank)")}`,
+            };
+        }
+    }
+
+    const adoSeverity = getAdoFieldValue(fields, adoFieldRefs.severity);
+    console.log(`[Info] ADO Severity value: '${adoSeverity}'`);
 
     const qtestSeverityValue = mapAdoSeverityToQtestValue(adoSeverity);
     console.log(`[Info] Mapped ADO Severity '${adoSeverity}' to qTest Severity value '${qtestSeverityValue}'`);
 
-    const adoPriority = fields["Microsoft.VSTS.Common.Priority"];
+    const adoPriority = getAdoFieldValue(fields, adoFieldRefs.priority);
     console.log(`[Info] ADO Priority value: '${adoPriority}'`);
 
     const qtestPriorityValue = mapAdoPriorityToQtestValue(adoPriority);
     console.log(`[Info] Mapped ADO Priority '${adoPriority}' to qTest Priority value '${qtestPriorityValue}'`);
 
-    const adoDefectType = fields["BP.ERP.DefectType"];
+    const adoDefectType = getAdoFieldValue(fields, adoFieldRefs.defectType);
     console.log(`[Info] ADO Defect Type value: '${adoDefectType}'`);
 
     const qtestDefectTypeValue = await resolveDefectFieldValue(
@@ -864,7 +953,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     );
     console.log(`[Info] Mapped ADO Defect Type '${adoDefectType}' to qTest Defect Type value '${qtestDefectTypeValue}'`);
 
-    const adoState = fields["System.State"];
+    const adoState = getAdoFieldValue(fields, adoFieldRefs.state);
     console.log(`[Info] ADO State value: '${adoState}'`);
     const qtestStatusLabel = normalizeAdoStatusForQtest(adoState);
 
@@ -879,29 +968,33 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         console.log(`[Warn] ADO State '${adoState}' does not match any defined qTest status.`);
     }
 
-    const adoRootCause =
-        fields["Microsoft.VSTS.CMMI.RootCause@OData.Community.Display.V1.FormattedValue"] ||
-        fields["Microsoft.VSTS.CMMI.RootCause"] || "";
+    const adoRootCause = getAdoFieldValue(fields, adoFieldRefs.rootCause, { preferFormatted: true });
     console.log(`[Info] ADO Root Cause value: '${adoRootCause}'`);
 
-    const qtestRootCauseValue = adoRootCause;
+    const qtestRootCauseValue = await resolveDefectFieldValue(
+        constants.DefectRootCauseFieldID,
+        adoRootCause,
+        "Root Cause",
+        defectContext
+    );
+    console.log(`[Info] Mapped ADO Root Cause '${adoRootCause}' to qTest Root Cause value '${qtestRootCauseValue}'`);
 
-    const adoProposedFix = fields["Microsoft.VSTS.CMMI.ProposedFix"] || "";
+    const adoProposedFix = getAdoFieldValue(fields, adoFieldRefs.proposedFix);
     console.log(`[Info] ADO Proposed Fix value length: ${adoProposedFix.length}`);
 
     const qtestProposedFixValue = adoProposedFix;
 
-    const adoActualCloseDate = fields["BP.ERP.ActualClose"];
+    const adoActualCloseDate = getAdoFieldValue(fields, adoFieldRefs.closedDate);
     let qtestClosedDateValue = null;
 
-    const adoTargetDate = fields["Microsoft.VSTS.Scheduling.TargetDate"];
+    const adoTargetDate = getAdoFieldValue(fields, adoFieldRefs.targetDate);
     let qtestTargetDateValue = null;
     if (adoTargetDate) {
         qtestTargetDateValue = new Date(adoTargetDate).toISOString().replace(".000Z", "+00:00");
         console.log(`[Info] ADO Target Date: '${adoTargetDate}' => qTest Target Date: '${qtestTargetDateValue}'`);
     }
 
-    const adoExternalReference = fields["BP.ERP.ExternalReference"] || "";
+    const adoExternalReference = getAdoFieldValue(fields, adoFieldRefs.externalReference);
     console.log(`[Info] ADO External Reference value: '${adoExternalReference}'`);
 
     if (adoActualCloseDate) {
@@ -911,10 +1004,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         console.log(`[Info] No Actual Close Date found in ADO.`);
     }
 
-    const adoResolvedReason =
-        fields["Microsoft.VSTS.Common.ResolvedReason"] ||
-        fields["Microsoft.VSTS.Common.ResolvedReason@OData.Community.Display.V1.FormattedValue"] ||
-        "";
+    const adoResolvedReason = getAdoFieldValue(fields, adoFieldRefs.resolvedReason, { preferFormatted: true });
     console.log(`[Info] ADO Resolved Reason: '${adoResolvedReason}'`);
 
     const qtestResolvedReasonValue = await resolveDefectFieldValue(
@@ -926,7 +1016,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     console.log(`[Info] Mapped ADO Resolved Reason '${adoResolvedReason}' → qTest value '${qtestResolvedReasonValue}'`);
 
     if (defectToUpdate) {
-        await updateDefect(
+        const updateSucceeded = await updateDefect(
             defectToUpdate,
             defectSummary,
             defectDescription,
@@ -945,5 +1035,15 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             adoExternalReference,
             adoState
         );
+
+        if (updateSucceeded) {
+            if (assignedToWarningDetails) {
+                emitFriendlyWarning(assignedToWarningDetails);
+            }
+
+            if (assignedToTeamWarningDetails) {
+                emitFriendlyWarning(assignedToTeamWarningDetails);
+            }
+        }
     }
 };
