@@ -963,8 +963,9 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     }
 
     function shouldRetryAssignedToWithFallback(error, assignedToValue) {
+        const status = error?.response?.status ?? error?.status;
         return Boolean(
-            error?.response?.status === 400 &&
+            status === 400 &&
             normalizeText(assignedToValue) &&
             normalizeLookupLabel(assignedToValue) !== normalizeLookupLabel(DEFAULT_ADO_ASSIGNED_TO)
         );
@@ -980,12 +981,22 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     }
 
     async function postAdoBug(url, requestBody) {
-        return axios.post(url, requestBody, {
+        const response = await axios.post(url, requestBody, {
             headers: {
                 'Content-Type': 'application/json-patch+json',
                 'Authorization': `basic ${Buffer.from(`:${constants.AZDO_TOKEN}`).toString('base64')}`
-            }
+            },
+            validateStatus: () => true,
         });
+
+        if (response.status >= 200 && response.status < 300) {
+            return response;
+        }
+
+        const error = new Error(`Azure DevOps create failed with status ${response.status}`);
+        error.status = response.status;
+        error.response = response;
+        throw error;
     }
 
     async function createAzDoBugWithFallback(
@@ -1160,7 +1171,9 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
                 objectType: "Defect",
                 objectId: "Unknown",
                 objectPid: defectPid,
-                detail: `Unable to create defect in Azure DevOps from qTest defect '${defectId}'.`,
+                detail:
+                    `Unable to create defect in Azure DevOps from qTest defect '${defectId}'. ` +
+                    `${error?.response?.status ? `ADO returned HTTP ${error.response.status}.` : ""}`.trim(),
                 dedupKey: `ado-create:${defectId}:${defectPid || "nopid"}`,
             });
 
