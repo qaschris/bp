@@ -18,6 +18,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     let adoFieldRefs = null;
     const DEFECT_APPLICATION_FIELD_ID = normalizeText(constants.DefectApplicationFieldID) || "1566";
     const DEFECT_SITE_NAME_FIELD_ID = normalizeText(constants.DefectSiteNameFieldID) || "1569";
+    const DEFECT_ITERATION_PATH_FIELD_ID = normalizeText(constants.DefectIterationPathFieldID) || "1603";
 
     console.log(`[Info] Create defect event received for defect '${defectId}' in project '${projectId}'`);
 
@@ -64,6 +65,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             proposedFix: normalizeText(constants.AzDoProposedFixFieldRef),
             application: normalizeText(constants.AzDoApplicationFieldRef),
             siteName: normalizeText(constants.AzDoSiteNameFieldRef),
+            iterationPath: normalizeText(constants.AzDoIterationPathFieldRef),
             closedDate: normalizeText(constants.AzDoClosedDateFieldRef),
             resolvedReason: normalizeText(constants.AzDoResolvedReasonFieldRef),
             targetDate: normalizeText(constants.AzDoTargetDateFieldRef),
@@ -430,6 +432,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         const assignedToField = constants.DefectAssignedToFieldID ? getFieldById(defect, constants.DefectAssignedToFieldID) : null;
         const targetDateField = getFieldById(defect, constants.DefectTargetDateFieldID);
         const assignedToTeamField = constants.DefectAssignedToTeamFieldID ? getFieldById(defect, constants.DefectAssignedToTeamFieldID) : null;
+        const iterationPathField = getFieldById(defect, DEFECT_ITERATION_PATH_FIELD_ID);
         const targetDate = targetDateField ? targetDateField.field_value : null;
 
         console.log(`[Info] Defect Target Date: ${targetDate}`);
@@ -495,6 +498,20 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
         const siteName = await getDefectFieldLabel(DEFECT_SITE_NAME_FIELD_ID, siteNameField);
         console.log(`[Info] Defect Site Name: ${siteName}`);
+
+        let iterationPath = await getDefectFieldLabel(DEFECT_ITERATION_PATH_FIELD_ID, iterationPathField);
+        let iterationPathWarning = null;
+        let iterationPathWarningValue = "(blank)";
+        const defaultIterationPath = normalizeText(constants.AzDoDefaultIterationPath);
+        console.log(`[Info] Defect Iteration Path: ${iterationPath}`);
+        if (!iterationPath && defaultIterationPath) {
+            iterationPath = defaultIterationPath;
+            iterationPathWarning =
+                `Iteration Path was blank in qTest. Defaulted ADO Iteration Path to '${defaultIterationPath}'.`;
+            console.log(`[Warn] ${iterationPathWarning}`);
+        } else if (!iterationPath) {
+            console.log(`[Info] Defect Iteration Path is blank in qTest and no default ADO Iteration Path is configured.`);
+        }
 
         console.log(`[Debug] Root Cause target ADO field ref: '${adoFieldRefs.rootCause}'`);
         console.log(
@@ -604,7 +621,10 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             assignedToTeamLabel,
             assignedToTeamWarning,
             assignedToTeamWarningValue,
-            targetDate
+            targetDate,
+            iterationPath,
+            iterationPathWarning,
+            iterationPathWarningValue
         };
     }
 
@@ -651,7 +671,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         const statusId = parseInt(qtestStatus);
         switch (statusId) {
             case 10001: return "New";
-            case 10002: return "Active";
+            case 10002: return "In Analysis";
             case 10004: return "In Resolution";
             case 10003: return "Awaiting Implementation";
             case 10953: return "Resolved";
@@ -735,7 +755,8 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         qtestResolvedReason,
         qtestAssignedToIdentity,
         qtestAssignedToTeamLabel,
-        qtestTargetDate
+        qtestTargetDate,
+        qtestIterationPath
     ) {
         console.log(`[Info] Creating bug in Azure DevOps '${defectId}'`);
 
@@ -870,18 +891,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             });
             console.log(`[Info] Added Closed Date to ADO: ${formattedClosedDate}`);
         } else {
-            console.log(`[Info] Skipping Closed Date â€” no value in qTest`);
-        }
-
-        if (qtestResolvedReason) {
-            requestBody.push({
-                op: "add",
-                path: `/fields/${adoFieldRefs.resolvedReason}`,
-                value: qtestResolvedReason
-            });
-            console.log(`[Info] Added Resolved Reason to ADO: ${qtestResolvedReason}`);
-        } else {
-            console.log(`[Info] Skipping Resolved Reason â€” no value in qTest`);
+            console.log(`[Info] Skipping Closed Date — no value in qTest`);
         }
 
         if (qtestTargetDate) {
@@ -1036,6 +1046,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         const mappedDefectType = mapDefectType(qtestDefectType);
         const mappedAffectedRelease = mapAffectedRelease(qtestAffectedRelease);
         const finalAreaPath = normalizeAreaPathLabel(qtestAssignedToTeamLabel) || DEFAULT_AREA_PATH;
+        const finalIterationPath = normalizeText(qtestIterationPath) || normalizeText(constants.AzDoDefaultIterationPath);
 
         console.log(`[Info] Mapped severity: ${mappedSeverity}`);
         console.log(`[Info] Mapped Priority: ${mappedPriority}`);
@@ -1046,6 +1057,11 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             console.log(`[Info] Skipping Affected Release sync - either not set or value is 'P&O Release 1'`);
         }
         console.log(`[Info] Final ADO AreaPath to send: ${finalAreaPath}`);
+        if (finalIterationPath) {
+            console.log(`[Info] Final ADO Iteration Path to send: ${finalIterationPath}`);
+        } else {
+            console.log("[Info] Skipping Iteration Path sync - no qTest value and no default configured.");
+        }
         console.log(`[Debug] Root Cause target ADO field ref: '${adoFieldRefs.rootCause}'`);
 
         const requestBody = [
@@ -1096,6 +1112,10 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
         if (adoFieldRefs.siteName && qtestSiteName) {
             requestBody.push(buildFieldPatchOperation(adoFieldRefs.siteName, qtestSiteName));
+        }
+
+        if (adoFieldRefs.iterationPath && finalIterationPath) {
+            requestBody.push(buildFieldPatchOperation(adoFieldRefs.iterationPath, finalIterationPath));
         }
 
         if (qtestRootCause) {
@@ -1299,7 +1319,8 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         defectDetails.resolvedReason,
         defectDetails.assignedToIdentity,
         defectDetails.assignedToTeamLabel,
-        defectDetails.targetDate
+        defectDetails.targetDate,
+        defectDetails.iterationPath
     );
 
     if (!createResult || !createResult.bug) return;
@@ -1338,6 +1359,19 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             fieldValue: defectDetails.assignedToTeamWarningValue,
             detail: defectDetails.assignedToTeamWarning,
             dedupKey: `create:area-path-warning:${workItemId}`,
+        });
+    }
+
+    if (defectDetails.iterationPathWarning && adoFieldRefs.iterationPath) {
+        emitFriendlyWarning({
+            platform: "ADO",
+            objectType: "Defect",
+            objectId: workItemId,
+            objectPid: defectDetails.pid,
+            fieldName: adoFieldRefs.iterationPath,
+            fieldValue: defectDetails.iterationPathWarningValue,
+            detail: defectDetails.iterationPathWarning,
+            dedupKey: `create:iteration-path-warning:${workItemId}`,
         });
     }
 };

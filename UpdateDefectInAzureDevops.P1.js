@@ -9,6 +9,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
   let adoFieldRefs = null;
   const DEFECT_APPLICATION_FIELD_ID = normalizeText(constants.DefectApplicationFieldID) || "1566";
   const DEFECT_SITE_NAME_FIELD_ID = normalizeText(constants.DefectSiteNameFieldID) || "1569";
+  const DEFECT_ITERATION_PATH_FIELD_ID = normalizeText(constants.DefectIterationPathFieldID) || "1603";
 
   function emitEvent(name, payload) {
     return (t = triggers.find(t => t.name === name))
@@ -81,6 +82,22 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     return normalizeText(value).replace(/\s+/g, " ").toLowerCase();
   }
 
+  // Temporary normalization for ADO constrained values that differ only by
+  // dash style or mojibake. Keep this isolated so it is easy to remove once
+  // the customer confirms the final allowed values.
+  function normalizeAdoDashVariants(value) {
+    return normalizeText(value)
+      .replace(/â€“/gi, "–")
+      .replace(/â€”/gi, "—")
+      .replace(/\s+[‐‑‒–—−-]\s+/g, " – ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function normalizeComparableConstrainedLabel(value) {
+    return normalizeAdoDashVariants(value).toLowerCase();
+  }
+
   function normalizeAreaPathLabel(value) {
     return normalizeText(value);
   }
@@ -124,6 +141,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
       areaPath: normalizeText(constants.AzDoAreaPathFieldRef),
       assignedTo: normalizeText(constants.AzDoAssignedToFieldRef),
       targetDate: normalizeText(constants.AzDoTargetDateFieldRef),
+      iterationPath: normalizeText(constants.AzDoIterationPathFieldRef),
     };
   }
 
@@ -373,7 +391,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
       const statusId = parseInt(qtestStatus, 10);
       switch (statusId) {
         case 10001: return "New";
-        case 10002: return "Active";
+        case 10002: return "In Analysis";
         case 10004: return "In Resolution";
         case 10003: return "Awaiting Implementation";
         case 10953: return "Resolved";
@@ -502,12 +520,37 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const assignedToProp = getPropById(constants.DefectAssignedToFieldID);
     const assignedToTeamProp = getPropById(constants.DefectAssignedToTeamFieldID);
     const targetDateProp = getPropById(constants.DefectTargetDateFieldID);
+    const iterationPathProp = getPropById(DEFECT_ITERATION_PATH_FIELD_ID);
     const targetDate = norm(firstNonEmpty(targetDateProp?.field_value));
 
     const adoTitle = stripWorkItemPrefix(summary);
     const appLabel = normalizeText(await getDefectFieldLabel(DEFECT_APPLICATION_FIELD_ID, applicationProp));
     const srcLabel = normalizeText(await getDefectFieldLabel(constants.DefectSourceTeamFieldID, sourceTeamProp));
+    const srcLabelForAdo = normalizeAdoDashVariants(srcLabel);
     const siteLabel = normalizeText(await getDefectFieldLabel(DEFECT_SITE_NAME_FIELD_ID, siteNameProp));
+    const rawIterationPathLabel = normalizeText(await getDefectFieldLabel(DEFECT_ITERATION_PATH_FIELD_ID, iterationPathProp));
+    const defaultIterationPath = normalizeText(constants.AzDoDefaultIterationPath);
+    const desiredIterationPath = rawIterationPathLabel || defaultIterationPath;
+    let iterationPathWarningDetails = null;
+    if (srcLabel && srcLabelForAdo && srcLabel !== srcLabelForAdo) {
+      console.log("[Info] Normalized SourceTeam dash variants for ADO:", {
+        from: srcLabel,
+        to: srcLabelForAdo
+      });
+    }
+    if (!rawIterationPathLabel && defaultIterationPath && adoFieldRefs.iterationPath) {
+      iterationPathWarningDetails = {
+        platform: "ADO",
+        objectType: "Defect",
+        objectId: workItemId,
+        objectPid: defectPid,
+        fieldName: adoFieldRefs.iterationPath,
+        fieldValue: "(blank)",
+        detail: `Iteration Path was blank in qTest. Defaulted ADO Iteration Path to '${defaultIterationPath}'.`,
+        dedupKey: `update:iteration-path-warning:${workItemId}`,
+      };
+      console.log(`[Warn] ${iterationPathWarningDetails.detail}`);
+    }
     const assignedLabel = norm(firstNonEmpty(assignedToProp?.field_value));
     const assignedToLabel = norm(firstNonEmpty(assignedToProp?.field_value_name));
     const externalReference = norm(firstNonEmpty(externalReferenceProp?.field_value));
@@ -686,6 +729,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const curAssignedToRaw = getAdoFieldValue(cur, adoFieldRefs.assignedTo);
     const curAssignedTo = norm(extractAdoIdentityEmail(curAssignedToRaw));
     const curTargetDate = normalizeDateOnly(getAdoFieldValue(cur, adoFieldRefs.targetDate));
+    const curIterationPath = norm(getAdoFieldValue(cur, adoFieldRefs.iterationPath));
 
     const desiredDescription = description || "";
     const desiredDescriptionPlain = htmlToPlainText(desiredDescription);
@@ -754,9 +798,11 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
       patchData.push(buildFieldPatchOperation(adoFieldRefs.closedDate, desiredClosedDate));
     }
 
-    if (resolvedReasonLabel && curResolvedReason !== resolvedReasonLabel) {
+    if (resolvedReasonLabel && mappedStatus !== "New" && curResolvedReason !== resolvedReasonLabel) {
       console.log("[Info] Updating Resolved Reason:", { from: curResolvedReason || "(empty)", to: resolvedReasonLabel });
       patchData.push(buildFieldPatchOperation(adoFieldRefs.resolvedReason, resolvedReasonLabel));
+    } else if (resolvedReasonLabel && mappedStatus === "New") {
+      console.log("[Info] Skipping Resolved Reason sync because outbound ADO State is 'New'.");
     }
 
     if (adoFieldRefs.application && appLabel && curApp !== appLabel) {
@@ -764,9 +810,13 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
       patchData.push(buildFieldPatchOperation(adoFieldRefs.application, appLabel));
     }
 
-    if (adoFieldRefs.sourceTeam && srcLabel && curSrc !== srcLabel) {
-      console.log("[Info] Updating SourceTeam:", { from: curSrc || "(empty)", to: srcLabel });
-      patchData.push(buildFieldPatchOperation(adoFieldRefs.sourceTeam, srcLabel));
+    if (
+      adoFieldRefs.sourceTeam &&
+      srcLabelForAdo &&
+      normalizeComparableConstrainedLabel(curSrc) !== normalizeComparableConstrainedLabel(srcLabelForAdo)
+    ) {
+      console.log("[Info] Updating SourceTeam:", { from: curSrc || "(empty)", to: srcLabelForAdo });
+      patchData.push(buildFieldPatchOperation(adoFieldRefs.sourceTeam, srcLabelForAdo));
     }
 
     if (adoFieldRefs.siteName && siteLabel && curSite !== siteLabel) {
@@ -800,6 +850,11 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
       patchData.push(buildFieldPatchOperation(adoFieldRefs.targetDate, desiredTargetDate));
     }
 
+    if (adoFieldRefs.iterationPath && desiredIterationPath && curIterationPath !== desiredIterationPath) {
+      console.log("[Info] Updating Iteration Path:", { from: curIterationPath || "(empty)", to: desiredIterationPath });
+      patchData.push(buildFieldPatchOperation(adoFieldRefs.iterationPath, desiredIterationPath));
+    }
+
     const backlink = defect.web_url || qTestDefectUrl;
     const hasLink = (adoCurrent?.relations || []).some(
       r => r.rel === "Hyperlink" && (r.url || "").toLowerCase() === (backlink || "").toLowerCase()
@@ -814,6 +869,9 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
       }
       if (assignedToTeamWarningDetails) {
         emitFriendlyWarning(assignedToTeamWarningDetails);
+      }
+      if (iterationPathWarningDetails) {
+        emitFriendlyWarning(iterationPathWarningDetails);
       }
       console.log("[Info] No ADO changes detected; skipping patch (prevents loops).");
       return;
@@ -884,6 +942,9 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
       }
       if (assignedToTeamWarningDetails) {
         emitFriendlyWarning(assignedToTeamWarningDetails);
+      }
+      if (iterationPathWarningDetails) {
+        emitFriendlyWarning(iterationPathWarningDetails);
       }
     } catch (err) {
       console.error("[Error] Azure update failed:", err.response?.data || err.message);

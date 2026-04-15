@@ -8,6 +8,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     let adoFieldRefs = null;
     const DEFECT_APPLICATION_FIELD_ID = normalizeText(constants.DefectApplicationFieldID) || "1566";
     const DEFECT_SITE_NAME_FIELD_ID = normalizeText(constants.DefectSiteNameFieldID) || "1569";
+    const DEFECT_ITERATION_PATH_FIELD_ID = normalizeText(constants.DefectIterationPathFieldID) || "1603";
     const DEFECT_LINK_TO_AZURE_DEVOPS_LABEL = "Link to Azure DevOps";
 
     const DEFAULT_AREA_PATH = constants.AreaPath;
@@ -235,6 +236,8 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             assignedTo: normalizeText(constants.AzDoAssignedToFieldRef),
             application: normalizeText(constants.AzDoApplicationFieldRef),
             siteName: normalizeText(constants.AzDoSiteNameFieldRef),
+            bugStage: normalizeText(constants.AzDoBugStageFieldRef),
+            iterationPath: normalizeText(constants.AzDoIterationPathFieldRef),
         };
     }
 
@@ -435,11 +438,22 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             return "";
         }
 
-        if (["active", "cancelled"].includes(normalizeLabel(normalizedStatus))) {
-            return null;
-        }
-
         return normalizedStatus;
+    }
+
+    function mapAdoBugStageToQtestAffectedReleaseValue(adoBugStage) {
+        const bugStageMap = {
+            "p&o_r1_sit dry run": 283,
+            "p&o_r1_sit1": 279,
+            "p&o_r1_sit2": 280,
+            "p&o_r1_dc1": 284,
+            "p&o_r1_dc2": 285,
+            "p&o_r1_dc3": 286,
+            "p&o_r1_uat": 287,
+            "unit testing": 302,
+        };
+
+        return bugStageMap[normalizeLabel(adoBugStage)] || null;
     }
 
     function mapAdoSeverityToQtestValue(adoSeverity) {
@@ -657,6 +671,8 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         linkValue,
         applicationValue,
         siteNameValue,
+        affectedReleaseValue,
+        iterationPathValue,
         severityValue,
         priorityValue,
         rootCauseValue,
@@ -713,6 +729,24 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
                 field_id: Number.isNaN(parsedSiteNameFieldId) ? DEFECT_SITE_NAME_FIELD_ID : parsedSiteNameFieldId,
                 field_value: Number.isNaN(parsedSiteNameValue) ? siteNameValue : parsedSiteNameValue,
             });
+        }
+
+        if (constants.DefectAffectedReleaseFieldID && affectedReleaseValue) {
+            requestBody.properties.push({
+                field_id: constants.DefectAffectedReleaseFieldID,
+                field_value: parseInt(affectedReleaseValue, 10),
+            });
+            console.log(`[Info] Added Affected Release '${affectedReleaseValue}' to qTest update payload.`);
+        }
+
+        if (iterationPathValue !== null && iterationPathValue !== undefined && iterationPathValue !== "") {
+            const parsedIterationPathValue = parseInt(iterationPathValue, 10);
+            const parsedIterationPathFieldId = parseInt(DEFECT_ITERATION_PATH_FIELD_ID, 10);
+            requestBody.properties.push({
+                field_id: Number.isNaN(parsedIterationPathFieldId) ? DEFECT_ITERATION_PATH_FIELD_ID : parsedIterationPathFieldId,
+                field_value: Number.isNaN(parsedIterationPathValue) ? iterationPathValue : parsedIterationPathValue,
+            });
+            console.log(`[Info] Added Iteration Path '${iterationPathValue}' to qTest update payload.`);
         }
 
         if (severityValue) {
@@ -945,6 +979,14 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const defectContext = defectToUpdate
         ? { id: defectToUpdate.id, pid: defectToUpdate.pid }
         : null;
+    const adoState = getAdoFieldValue(fields, adoFieldRefs.state);
+    console.log(`[Info] ADO State value: '${adoState}'`);
+
+    if (["active", "cancelled"].includes(normalizeLabel(adoState))) {
+        console.log(`[Info] Skipping ADO -> qTest defect sync for ADO State '${adoState}' per current business rule.`);
+        return;
+    }
+
     const adoLinkValue = normalizeText(event?.resource?._links?.html?.href);
     const qtestLinkFieldId = normalizeText(constants.DefectLinkToAzureDevOpsFieldID)
         || String(await getDefectFieldIdByLabel(DEFECT_LINK_TO_AZURE_DEVOPS_LABEL) || "");
@@ -1090,23 +1132,17 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     );
     console.log(`[Info] Mapped ADO Defect Type '${adoDefectType}' to qTest Defect Type value '${qtestDefectTypeValue}'`);
 
-    const adoState = getAdoFieldValue(fields, adoFieldRefs.state);
-    console.log(`[Info] ADO State value: '${adoState}'`);
     const qtestStatusLabel = mapAdoStatusToQtestLabel(adoState);
     let qtestStatusValue = null;
-    if (qtestStatusLabel === null) {
-        console.log(`[Info] Skipping qTest status update for ADO State '${adoState}' pending business confirmation.`);
-    } else {
-        qtestStatusValue = await resolveDefectFieldValue(
-            constants.DefectStatusFieldID,
-            qtestStatusLabel,
-            "Status",
-            defectContext
-        );
-        console.log(`[Info] Mapped ADO State '${adoState}' to qTest Status label '${qtestStatusLabel}' and qTest Status value '${qtestStatusValue}'`);
-        if (!qtestStatusValue) {
-            console.log(`[Warn] ADO State '${adoState}' does not match any defined qTest status.`);
-        }
+    qtestStatusValue = await resolveDefectFieldValue(
+        constants.DefectStatusFieldID,
+        qtestStatusLabel,
+        "Status",
+        defectContext
+    );
+    console.log(`[Info] Mapped ADO State '${adoState}' to qTest Status label '${qtestStatusLabel}' and qTest Status value '${qtestStatusValue}'`);
+    if (!qtestStatusValue) {
+        console.log(`[Warn] ADO State '${adoState}' does not match any defined qTest status.`);
     }
 
     const adoRootCauseRaw = adoFieldRefs.rootCause ? fields?.[adoFieldRefs.rootCause] : "";
@@ -1159,16 +1195,43 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         console.log(`[Info] No Actual Close Date found in ADO.`);
     }
 
+    const adoBugStage = adoFieldRefs.bugStage
+        ? getAdoFieldValue(fields, adoFieldRefs.bugStage, { preferFormatted: true })
+        : "";
+    console.log(`[Info] ADO Bug Stage value: '${adoBugStage}'`);
+    const qtestAffectedReleaseValue = mapAdoBugStageToQtestAffectedReleaseValue(adoBugStage);
+    let affectedReleaseWarningDetails = null;
+    if (qtestAffectedReleaseValue) {
+        console.log(`[Info] Mapped ADO Bug Stage '${adoBugStage}' to qTest Affected Release value '${qtestAffectedReleaseValue}'`);
+    } else if (adoBugStage) {
+        affectedReleaseWarningDetails = {
+            platform: "qTest",
+            objectType: "Defect",
+            objectId: defectContext?.id ?? workItemId,
+            objectPid: defectContext?.pid,
+            fieldName: "Affected Release",
+            fieldValue: adoBugStage,
+            detail: `ADO Bug Stage '${adoBugStage}' could not be mapped to qTest Affected Release. Affected Release update was skipped.`,
+            dedupKey: `warning:affected-release:${defectContext?.id ?? workItemId}:${normalizeLabel(adoBugStage)}`,
+        };
+        console.log(`[Warn] ${affectedReleaseWarningDetails.detail}`);
+    }
+
     const adoResolvedReason = getAdoFieldValue(fields, adoFieldRefs.resolvedReason, { preferFormatted: true });
     console.log(`[Info] ADO Resolved Reason: '${adoResolvedReason}'`);
 
-    const qtestResolvedReasonValue = await resolveDefectFieldValue(
+    const qtestResolvedReasonResult = await resolveOptionalDefectFieldValue(
         constants.DefectResolvedReasonFieldID,
         adoResolvedReason,
         "Resolved Reason",
         defectContext
     );
+    const qtestResolvedReasonValue = qtestResolvedReasonResult.value;
     console.log(`[Info] Mapped ADO Resolved Reason '${adoResolvedReason}' → qTest value '${qtestResolvedReasonValue}'`);
+
+    if (adoResolvedReason && !qtestResolvedReasonValue) {
+        console.log(`[Warn] ADO Resolved Reason '${adoResolvedReason}' could not be mapped to qTest. Resolved Reason update will be skipped.`);
+    }
 
     const adoApplication = adoFieldRefs.application
         ? getAdoFieldValue(fields, adoFieldRefs.application, { preferFormatted: true })
@@ -1206,6 +1269,24 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         console.log(`[Warn] ADO Site Name '${adoSiteName}' could not be mapped to qTest. Site Name update will be skipped.`);
     }
 
+    const adoIterationPath = adoFieldRefs.iterationPath
+        ? getAdoFieldValue(fields, adoFieldRefs.iterationPath, { preferFormatted: true })
+        : "";
+    console.log(`[Info] ADO Iteration Path value: '${adoIterationPath}'`);
+
+    const qtestIterationPathResult = await resolveOptionalDefectFieldValue(
+        DEFECT_ITERATION_PATH_FIELD_ID,
+        adoIterationPath,
+        "Iteration Path",
+        defectContext
+    );
+    const qtestIterationPathValue = qtestIterationPathResult.value;
+    if (qtestIterationPathValue) {
+        console.log(`[Info] Mapped ADO Iteration Path '${adoIterationPath}' to qTest Iteration Path value '${qtestIterationPathValue}'`);
+    } else if (adoIterationPath) {
+        console.log(`[Warn] ADO Iteration Path '${adoIterationPath}' could not be mapped to qTest. Iteration Path update will be skipped.`);
+    }
+
     if (defectToUpdate) {
         const updateSucceeded = await updateDefect(
             defectToUpdate,
@@ -1215,6 +1296,8 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             adoLinkValue,
             qtestApplicationValue,
             qtestSiteNameValue,
+            qtestAffectedReleaseValue,
+            qtestIterationPathValue,
             qtestSeverityValue,
             qtestPriorityValue,
             qtestRootCauseValue,
@@ -1248,12 +1331,24 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
                 emitFriendlyWarning(qtestRootCauseResult.warningDetails);
             }
 
+            if (affectedReleaseWarningDetails) {
+                emitFriendlyWarning(affectedReleaseWarningDetails);
+            }
+
+            if (qtestResolvedReasonResult.warningDetails) {
+                emitFriendlyWarning(qtestResolvedReasonResult.warningDetails);
+            }
+
             if (qtestApplicationResult.warningDetails) {
                 emitFriendlyWarning(qtestApplicationResult.warningDetails);
             }
 
             if (qtestSiteNameResult.warningDetails) {
                 emitFriendlyWarning(qtestSiteNameResult.warningDetails);
+            }
+
+            if (qtestIterationPathResult.warningDetails) {
+                emitFriendlyWarning(qtestIterationPathResult.warningDetails);
             }
         }
     }
