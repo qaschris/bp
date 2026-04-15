@@ -1,12 +1,18 @@
 const axios = require("axios");
-const { Webhooks } = require('@qasymphony/pulse-sdk');
+const { Webhooks } = require("@qasymphony/pulse-sdk");
 
 exports.handler = async function ({ event, constants, triggers }, context, callback) {
     const qtestMetadataCache = {};
+    const emittedMessageKeys = new Set();
+    const DEFAULT_QTEST_ASSIGNED_TO_IDENTITY =
+        normalizeText(constants.RequirementAssignedToFallbackIdentity) || "ado-qtest-svc@bp.com";
+    let adoFieldRefs = null;
+    let relevantUpdatedFieldRefs = new Set();
 
     function emitEvent(name, payload) {
-        return (t = triggers.find(t => t.name === name))
-            ? new Webhooks().invoke(t, payload)
+        const trigger = triggers.find(item => item.name === name);
+        return trigger
+            ? new Webhooks().invoke(trigger, payload)
             : console.error(`[ERROR]: (emitEvent) Webhook named '${name}' not found.`);
     }
 
@@ -14,6 +20,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         const platform = details.platform || "Unknown";
         const objectType = details.objectType || "Object";
         const objectId = details.objectId != null ? details.objectId : "Unknown";
+        const objectPid = details.objectPid ? ` Object PID: ${details.objectPid}.` : "";
         const fieldName = details.fieldName ? ` Field: ${details.fieldName}.` : "";
         const fieldValue = details.fieldValue != null && details.fieldValue !== ""
             ? ` Value: ${details.fieldValue}.`
@@ -21,10 +28,68 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         const detail = details.detail || "Sync failed.";
 
         const message =
-            `Sync failed. Platform: ${platform}. Object Type: ${objectType}. Object ID: ${objectId}.${fieldName}${fieldValue} Detail: ${detail}`;
+            `Sync failed. Platform: ${platform}. Object Type: ${objectType}. Object ID: ${objectId}.${objectPid}${fieldName}${fieldValue} Detail: ${detail}`;
+        const dedupKey = details.dedupKey || `failure|${message}`;
 
+        if (emittedMessageKeys.has(dedupKey)) return false;
+        emittedMessageKeys.add(dedupKey);
         console.error(`[Error] ${message}`);
-        emitEvent('ChatOpsEvent', { message });
+        emitEvent("ChatOpsEvent", { message });
+        return true;
+    }
+
+    function emitFriendlyWarning(details = {}) {
+        const platform = details.platform || "Unknown";
+        const objectType = details.objectType || "Object";
+        const objectId = details.objectId != null ? details.objectId : "Unknown";
+        const objectPid = details.objectPid ? ` Object PID: ${details.objectPid}.` : "";
+        const fieldName = details.fieldName ? ` Field: ${details.fieldName}.` : "";
+        const fieldValue = details.fieldValue != null && details.fieldValue !== ""
+            ? ` Value: ${details.fieldValue}.`
+            : "";
+        const detail = details.detail || "Sync warning.";
+
+        const message =
+            `Sync warning. Platform: ${platform}. Object Type: ${objectType}. Object ID: ${objectId}.${objectPid}${fieldName}${fieldValue} Detail: ${detail}`;
+        const dedupKey = details.dedupKey || `warning|${message}`;
+
+        if (emittedMessageKeys.has(dedupKey)) return false;
+        emittedMessageKeys.add(dedupKey);
+        console.log(`[Warn] ${message}`);
+        emitEvent("ChatOpsEvent", { message });
+        return true;
+    }
+
+    function normalizeText(value) {
+        return value == null
+            ? ""
+            : String(value)
+                .normalize("NFKC")
+                .replace(/[\u200B-\u200D\uFEFF]/g, "")
+                .replace(/<0x(?:200b|200c|200d|feff)>/gi, "")
+                .trim();
+    }
+
+    function firstNonEmpty(...values) {
+        for (const value of values) {
+            if (value !== undefined && value !== null && value !== "") return value;
+        }
+        return "";
+    }
+
+    function safeJson(value) {
+        try {
+            return JSON.stringify(value, null, 2);
+        } catch (error) {
+            return `[Unserializable: ${error.message}]`;
+        }
+    }
+
+    function markFriendlyFailure(error) {
+        if (error && typeof error === "object") {
+            error.__friendlyFailureEmitted = true;
+        }
+        return error;
     }
 
     function getFields(eventData) {
@@ -63,7 +128,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             return "";
         }
 
-        let cleaned = value
+        const cleaned = value
             .replace(/\s*<[^>]*>/g, "")
             .trim();
 
@@ -104,10 +169,10 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
     function isRicefwFeature(eventData) {
         const fields = getFields(eventData);
-        const workItemType = (fields["System.WorkItemType"] || "").toString().trim();
-        const featureType = (fields["Custom.BPFeatureType"] || "").toString().trim();
-        const ricefwConfiguration = (fields["BP.ERP.RICEFW"] || "").toString().trim();
-        const featureState = (fields["System.State"] || "").toString().trim();
+        const workItemType = normalizeText(getAdoFieldValue(fields, adoFieldRefs.workItemType));
+        const featureType = normalizeText(getAdoFieldValue(fields, adoFieldRefs.featureType));
+        const ricefwConfiguration = normalizeText(getAdoFieldValue(fields, adoFieldRefs.ricefwConfiguration));
+        const featureState = normalizeText(getAdoFieldValue(fields, adoFieldRefs.state));
 
         console.log(
             `[Debug] Evaluating if work item is a RICEFW Feature: ` +
@@ -132,24 +197,24 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     }
 
     function buildRequirementName(namePrefix, eventData) {
-        const fields = getFields(eventData);
-        return `${namePrefix}${fields["System.Title"]}`;
+        return `${namePrefix}${getAdoFieldValue(getFields(eventData), adoFieldRefs.title)}`;
     }
 
     function buildRequirementDescription(eventData) {
         const fields = getFields(eventData);
 
-        const workItemType = fields["System.WorkItemType"] || "";
-        const areaPath = fields["System.AreaPath"] || "";
-        const iterationPath = fields["System.IterationPath"] || "";
-        const state = fields["System.State"] || "";
-        const reason = fields["System.Reason"] || "";
-        const acceptanceCriteria = fields["Microsoft.VSTS.Common.AcceptanceCriteria"] || "";
-        const description = fields["System.Description"] || "";
-        const processRelease = fields["Custom.ProcessRelease"] || "";
-        const ricefwId = fields["Custom.RICEFWID"] || "";
+        const workItemType = getAdoFieldValue(fields, adoFieldRefs.workItemType) || "";
+        const areaPath = getAdoFieldValue(fields, adoFieldRefs.areaPath) || "";
+        const iterationPath = getAdoFieldValue(fields, adoFieldRefs.iterationPath) || "";
+        const state = getAdoFieldValue(fields, adoFieldRefs.state) || "";
+        const reason = getAdoFieldValue(fields, adoFieldRefs.reason) || "";
+        const acceptanceCriteria = getAdoFieldValue(fields, adoFieldRefs.acceptanceCriteria) || "";
+        const description = getAdoFieldValue(fields, adoFieldRefs.description) || "";
+        const processRelease = getAdoFieldValue(fields, adoFieldRefs.processRelease) || "";
+        const ricefwId = getAdoFieldValue(fields, adoFieldRefs.ricefwId) || "";
+        const htmlHref = firstNonEmpty(eventData?.resource?._links?.html?.href, eventData?.resource?.revision?._links?.html?.href);
 
-        return `<a href="${eventData.resource._links.html.href}" target="_blank">Open in Azure DevOps</a><br>
+        return `<a href="${htmlHref}" target="_blank">Open in Azure DevOps</a><br>
                 <b>Type:</b> ${workItemType}<br>
                 <b>Area Path:</b> ${areaPath}<br>
                 <b>Iteration:</b> ${iterationPath}<br>
@@ -167,31 +232,139 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     };
 
     function normalizeBaseUrl(value) {
-        const raw = (value || "").toString().trim().replace(/\/+$/, "");
-        if (!raw) {
-            throw new Error("A qTest base URL is required.");
-        }
-
-        return raw.startsWith("http://") || raw.startsWith("https://")
-            ? raw
-            : `https://${raw}`;
+        const raw = normalizeText(value).replace(/\/+$/, "");
+        if (!raw) throw new Error("A qTest base URL is required.");
+        return raw.startsWith("http://") || raw.startsWith("https://") ? raw : `https://${raw}`;
     }
 
     function normalizeLabel(value) {
-        return value == null ? "" : String(value).trim().toLowerCase();
+        return normalizeText(value).replace(/\s+/g, " ").toLowerCase();
     }
 
     function normalizeFieldResponse(data) {
         if (Array.isArray(data)) return data;
         if (Array.isArray(data?.items)) return data.items;
         if (Array.isArray(data?.data)) return data.data;
+        if (Array.isArray(data?.users)) return data.users;
         return [];
     }
 
-    function getAllowedValues(fieldDefinition) {
+    function getAllowedValues(fieldDefinition, options = {}) {
+        const includeInactive = options.includeInactive === true;
         return Array.isArray(fieldDefinition?.allowed_values)
-            ? fieldDefinition.allowed_values.filter(v => v?.is_active !== false)
+            ? fieldDefinition.allowed_values.filter(v => includeInactive || v?.is_active !== false)
             : [];
+    }
+
+    function getAdoFieldValue(fields, fieldRef, options = {}) {
+        if (!fields || !fieldRef) return "";
+        if (options.preferFormatted) {
+            const formatted = fields[`${fieldRef}@OData.Community.Display.V1.FormattedValue`];
+            if (formatted !== undefined && formatted !== null && formatted !== "") return formatted;
+        }
+        return firstNonEmpty(fields[fieldRef]);
+    }
+
+    function buildAdoFieldRefs() {
+        return {
+            title: normalizeText(constants.AzDoTitleFieldRef),
+            workItemType: normalizeText(constants.AzDoWorkItemTypeFieldRef),
+            areaPath: normalizeText(constants.AzDoAreaPathFieldRef),
+            iterationPath: normalizeText(constants.AzDoIterationPathFieldRef),
+            state: normalizeText(constants.AzDoStateFieldRef),
+            reason: normalizeText(constants.AzDoReasonFieldRef),
+            assignedTo: normalizeText(constants.AzDoAssignedToFieldRef),
+            description: normalizeText(constants.AzDoDescriptionFieldRef),
+            acceptanceCriteria: normalizeText(constants.AzDoAcceptanceCriteriaFieldRef),
+            priority: normalizeText(constants.AzDoPriorityFieldRef),
+            complexity: normalizeText(constants.AzDoComplexityFieldRef),
+            applicationName: normalizeText(constants.AzDoApplicationNameFieldRef),
+            processRelease: normalizeText(constants.AzDoProcessReleaseFieldRef),
+            ricefwId: normalizeText(constants.AzDoRICEFWIdFieldRef),
+            testingStatus: normalizeText(constants.AzDoTestingStatusFieldRef),
+            featureType: normalizeText(constants.AzDoBPFeatureTypeFieldRef),
+            area: normalizeText(constants.AzDoAreaFieldRef),
+            ricefwConfiguration: normalizeText(constants.AzDoRICEFWConfigurationFieldRef),
+        };
+    }
+
+    function buildRelevantUpdatedFieldRefs() {
+        return new Set([
+            adoFieldRefs.title,
+            adoFieldRefs.workItemType,
+            adoFieldRefs.areaPath,
+            adoFieldRefs.iterationPath,
+            adoFieldRefs.state,
+            adoFieldRefs.reason,
+            adoFieldRefs.assignedTo,
+            adoFieldRefs.description,
+            adoFieldRefs.acceptanceCriteria,
+            adoFieldRefs.priority,
+            adoFieldRefs.complexity,
+            adoFieldRefs.applicationName,
+            adoFieldRefs.processRelease,
+            adoFieldRefs.ricefwId,
+            adoFieldRefs.testingStatus,
+            adoFieldRefs.featureType,
+            adoFieldRefs.area,
+            adoFieldRefs.ricefwConfiguration,
+        ].filter(Boolean));
+    }
+
+    function validateRequiredConfiguration() {
+        const missingQtestConstants = [
+            "RequirementDescriptionFieldID",
+            "RequirementStreamSquadFieldID",
+            "RequirementWorkItemTypeFieldID",
+            "RequirementAssignedToFieldID",
+            "RequirementIterationPathFieldID",
+            "RequirementStateFieldID",
+            "RequirementReasonFieldID",
+            "RequirementAcceptanceCriteriaFieldID",
+            "RequirementPlainDescriptionFieldID",
+            "RequirementProcessReleaseFieldID",
+            "RequirementRicefwIdFieldID",
+            "RequirementRICEFWConfigurationFieldID",
+            "RequirementTestingStatusFieldID",
+            "RequirementFeatureTypeFieldID",
+            "RequirementAreaFieldID",
+            "FeatureParentID",
+        ].filter(name => !normalizeText(constants[name]));
+
+        if (missingQtestConstants.length) {
+            emitFriendlyFailure({
+                platform: "Pulse",
+                objectType: "Configuration",
+                objectId: "Unknown",
+                fieldName: missingQtestConstants.join(", "),
+                detail: "Required qTest RICEFW field constants are missing in Pulse.",
+                dedupKey: `ricefw-config-qtest:${missingQtestConstants.join("|")}`,
+            });
+            return false;
+        }
+
+        adoFieldRefs = buildAdoFieldRefs();
+        const requiredAdoRefKeys = [
+            "title", "workItemType", "areaPath", "iterationPath", "state", "reason",
+            "assignedTo", "description", "acceptanceCriteria", "priority", "complexity",
+            "processRelease", "ricefwId", "testingStatus", "featureType", "area",
+            "ricefwConfiguration",
+        ];
+        const missingAdoRefs = requiredAdoRefKeys.filter(key => !adoFieldRefs[key]);
+        if (missingAdoRefs.length) {
+            emitFriendlyFailure({
+                platform: "Pulse",
+                objectType: "Configuration",
+                objectId: "Unknown",
+                fieldName: missingAdoRefs.join(", "),
+                detail: "Required Azure DevOps RICEFW field reference constants are missing in Pulse.",
+                dedupKey: `ricefw-config-ado:${missingAdoRefs.join("|")}`,
+            });
+            return false;
+        }
+
+        relevantUpdatedFieldRefs = buildRelevantUpdatedFieldRefs();
+        return true;
     }
 
     async function getFieldDefinitions(objectType) {
@@ -209,7 +382,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         return fields;
     }
 
-    async function resolveFieldValue(fieldId, rawValue, objectType) {
+    async function resolveFieldValue(fieldId, rawValue, objectType, options = {}) {
         if (rawValue === undefined || rawValue === null || rawValue === "") {
             return null;
         }
@@ -225,7 +398,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             return rawValue;
         }
 
-        const allowedValues = getAllowedValues(fieldDefinition);
+        const allowedValues = getAllowedValues(fieldDefinition, options);
         const normalizedRawValue = normalizeLabel(rawValue);
 
         const exactValueMatch = allowedValues.find(option => String(option?.value) === String(rawValue));
@@ -242,27 +415,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             `Unable to resolve qTest option for field '${fieldDefinition.label}' (${fieldId}) from value '${rawValue}'.`
         );
     }
-
-    const relevantUpdatedFieldRefs = new Set([
-        "System.Title",
-        "System.WorkItemType",
-        "System.AreaPath",
-        "System.IterationPath",
-        "System.State",
-        "System.Reason",
-        "System.AssignedTo",
-        "System.Description",
-        "Microsoft.VSTS.Common.AcceptanceCriteria",
-        "Microsoft.VSTS.Common.Priority",
-        "Custom.Complexity",
-        "Custom.ApplicationName",
-        "Custom.ProcessRelease",
-        "Custom.RICEFWID",
-        "Custom.TestingStatus",
-        "Custom.BPFeatureType",
-        "Custom.Area",
-        "BP.ERP.RICEFW",
-    ]);
 
     function getChangedFieldRefs(eventData) {
         if (eventData?.eventType !== "workitem.updated") {
@@ -289,24 +441,156 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         return true;
     }
 
-    async function resolveRequirementFieldValue(fieldId, rawValue, fieldLabel) {
+    async function resolveRequirementFieldValue(fieldId, rawValue, fieldLabel, requirementContext = null, options = {}) {
         if (!fieldId || rawValue === undefined || rawValue === null || rawValue === "") {
             return null;
         }
 
         try {
-            return await resolveFieldValue(fieldId, rawValue, "requirements");
+            return await resolveFieldValue(fieldId, rawValue, "requirements", options);
+        } catch (error) {
+            if (options.emitFailure === false) throw error;
+            emitFriendlyFailure({
+                platform: "qTest",
+                objectType: "RICEFW/Feature",
+                objectId: requirementContext?.id || event?.resource?.workItemId || event?.resource?.id || "Unknown",
+                objectPid: requirementContext?.pid,
+                fieldName: fieldLabel,
+                fieldValue: rawValue,
+                detail: error.message,
+                dedupKey: `ricefw-field-failure:${fieldId}:${normalizeLabel(rawValue)}`,
+            });
+            throw markFriendlyFailure(error);
+        }
+    }
+
+    async function resolveOptionalRequirementFieldValue(fieldId, rawValue, fieldLabel, requirementContext = null) {
+        if (!fieldId || rawValue === undefined || rawValue === null || rawValue === "") {
+            return { value: null, warningDetails: null };
+        }
+
+        try {
+            const value = await resolveRequirementFieldValue(
+                fieldId,
+                rawValue,
+                fieldLabel,
+                requirementContext,
+                { includeInactive: true, emitFailure: false }
+            );
+            return { value, warningDetails: null };
+        } catch (error) {
+            return {
+                value: null,
+                warningDetails: {
+                    platform: "qTest",
+                    objectType: "RICEFW/Feature",
+                    objectId: requirementContext?.id || event?.resource?.workItemId || event?.resource?.id || "Unknown",
+                    objectPid: requirementContext?.pid,
+                    fieldName: fieldLabel,
+                    fieldValue: rawValue,
+                    detail: `${error.message} The field was left unchanged.`,
+                    dedupKey: `ricefw-field-warning:${fieldId}:${normalizeLabel(rawValue)}`,
+                },
+            };
+        }
+    }
+
+    function extractAdoAssignedToIdentity(value) {
+        if (!value) return "";
+        if (typeof value === "string") return normalizeText(value);
+        return normalizeText(
+            value.uniqueName ||
+            value.userPrincipalName ||
+            value.mail ||
+            value.email ||
+            value.displayName ||
+            value.name ||
+            ""
+        );
+    }
+
+    async function getProjectUsers() {
+        const cacheKey = `projectUsers:${constants.ProjectID}`;
+        if (qtestMetadataCache[cacheKey]) return qtestMetadataCache[cacheKey];
+
+        const url = `${normalizeBaseUrl(constants.ManagerURL)}/api/v3/projects/${constants.ProjectID}/users?inactive=false`;
+        try {
+            const response = await doRequest(url, "GET", null);
+            const users = normalizeFieldResponse(response);
+            qtestMetadataCache[cacheKey] = users;
+            return users;
         } catch (error) {
             emitFriendlyFailure({
                 platform: "qTest",
                 objectType: "RICEFW/Feature",
                 objectId: event?.resource?.workItemId || event?.resource?.id || "Unknown",
-                fieldName: fieldLabel,
-                fieldValue: rawValue,
-                detail: error.message,
+                fieldName: "Assigned To",
+                detail: "Unable to retrieve active qTest project users for Assigned To resolution.",
+                dedupKey: `ricefw-project-users:${constants.ProjectID}`,
             });
-            throw error;
+            throw markFriendlyFailure(error);
         }
+    }
+
+    function matchProjectUserIdentity(user, identity) {
+        const normalizedIdentity = normalizeLabel(identity);
+        if (!normalizedIdentity) return false;
+
+        return [
+            user?.username,
+            user?.ldap_username,
+            user?.external_user_name,
+        ].some(candidate => normalizeLabel(candidate) === normalizedIdentity);
+    }
+
+    async function findProjectUserIdByIdentity(identity) {
+        const normalizedIdentity = normalizeLabel(identity);
+        if (!normalizedIdentity) return null;
+
+        const users = await getProjectUsers();
+        const matchedUser = users.find(user => matchProjectUserIdentity(user, normalizedIdentity));
+        return matchedUser?.id ?? null;
+    }
+
+    async function resolveRequirementAssignedToUserId(adoAssignedTo, requirementContext = null) {
+        const sourceIdentity = extractAdoAssignedToIdentity(adoAssignedTo);
+        if (!sourceIdentity) return { userId: null, warningDetails: null };
+
+        const directUserId = await findProjectUserIdByIdentity(sourceIdentity);
+        if (directUserId) return { userId: directUserId, warningDetails: null };
+
+        if (DEFAULT_QTEST_ASSIGNED_TO_IDENTITY) {
+            const fallbackUserId = await findProjectUserIdByIdentity(DEFAULT_QTEST_ASSIGNED_TO_IDENTITY);
+            if (fallbackUserId) {
+                return {
+                    userId: fallbackUserId,
+                    warningDetails: {
+                        platform: "qTest",
+                        objectType: "RICEFW/Feature",
+                        objectId: requirementContext?.id || event?.resource?.workItemId || event?.resource?.id || "Unknown",
+                        objectPid: requirementContext?.pid,
+                        fieldName: "Assigned To",
+                        fieldValue: sourceIdentity,
+                        detail: `ADO Assigned To '${sourceIdentity}' could not be resolved in qTest. Defaulted Assigned To to '${DEFAULT_QTEST_ASSIGNED_TO_IDENTITY}'.`,
+                        dedupKey: `ricefw-assignedto-fallback:${normalizeLabel(sourceIdentity)}`,
+                    },
+                };
+            }
+        }
+
+        return {
+            userId: null,
+            warningDetails: {
+                platform: "qTest",
+                objectType: "RICEFW/Feature",
+                objectId: requirementContext?.id || event?.resource?.workItemId || event?.resource?.id || "Unknown",
+                objectPid: requirementContext?.pid,
+                fieldName: "Assigned To",
+                fieldValue: sourceIdentity,
+                detail: `ADO Assigned To '${sourceIdentity}' could not be resolved in qTest, and fallback '${DEFAULT_QTEST_ASSIGNED_TO_IDENTITY}' was not found in the project. Assigned To was left unchanged.`,
+                dedupKey: `ricefw-assignedto-missing:${normalizeLabel(sourceIdentity)}`,
+            },
+        };
     }
 
     async function doRequest(url, method, requestBody) {
@@ -314,8 +598,10 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             url,
             method,
             headers: standardHeaders,
-            data: requestBody,
         };
+        if (requestBody !== undefined && requestBody !== null && method !== "GET") {
+            opts.data = requestBody;
+        }
 
         try {
             const response = await axios(opts);
@@ -371,9 +657,10 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
                 platform: "qTest",
                 objectType: "RICEFW/Feature",
                 objectId: "ModulePath",
-                detail: `Unable to retrieve qTest module children for parent '${parentId}'.`
+                detail: `Unable to retrieve qTest module children for parent '${parentId}'.`,
+                dedupKey: `ricefw-modules-get:${parentId}`,
             });
-            throw error;
+            throw markFriendlyFailure(error);
         }
     }
 
@@ -397,9 +684,10 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
                 objectId: "ModulePath",
                 fieldName: "Module",
                 fieldValue: name,
-                detail: `Unable to create qTest module under parent '${parentId}'.`
+                detail: `Unable to create qTest module under parent '${parentId}'.`,
+                dedupKey: `ricefw-module-create:${parentId}:${normalizeLabel(name)}`,
             });
-            throw error;
+            throw markFriendlyFailure(error);
         }
     }
 
@@ -443,9 +731,10 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
                         objectId: "ModulePath",
                         fieldName: "Module",
                         fieldValue: segment,
-                        detail: "Module creation did not return an id."
+                        detail: "Module creation did not return an id.",
+                        dedupKey: `ricefw-module-missing-id:${normalizeLabel(segment)}`,
                     });
-                    throw new Error(`Module creation for '${segment}' did not return an id.`);
+                    throw markFriendlyFailure(new Error(`Module creation for '${segment}' did not return an id.`));
                 }
             }
         }
@@ -455,7 +744,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
     async function getRequirementByWorkItemId(workItemId) {
         const prefix = getNamePrefix(workItemId);
-        const url = `https://${constants.ManagerURL}/api/v3/projects/${constants.ProjectID}/search`;
+        const url = `${normalizeBaseUrl(constants.ManagerURL)}/api/v3/projects/${constants.ProjectID}/search`;
         const requestBody = {
             object_type: "requirements",
             fields: ["*"],
@@ -495,214 +784,264 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         return { failed, requirement };
     }
 
-    async function updateRequirement(
-        requirementToUpdate,
-        name,
-        description,
-        fields,
-        complexityValue,
-        workItemTypeValue,
-        priorityValue,
-        typeValue,
-        targetModuleId
-    ) {
-        const requirementId = requirementToUpdate.id;
-        const url = `https://${constants.ManagerURL}/api/v3/projects/${constants.ProjectID}/requirements/${requirementId}?parentId=${targetModuleId}`;
-        const requestBody = {
-            name,
-            properties: [],
-        };
-
-        const areaPath = fields["System.AreaPath"] || "";
-        const assignedTo = normalizeAssignedTo(fields["System.AssignedTo"]);
-        const iterationPath = fields["System.IterationPath"] || null;
-        const state = fields["System.State"] || null;
-        const reason = fields["System.Reason"] || null;
-        const acceptanceCriteria = fields["Microsoft.VSTS.Common.AcceptanceCriteria"] || "";
-        const fullDescription = fields["System.Description"] || "";
-        const applicationName = fields["Custom.ApplicationName"] || null;
-        const processRelease = fields["Custom.ProcessRelease"] || null;
-        const ricefwId = fields["Custom.RICEFWID"] || null;
-        const ricefwConfiguration = fields["BP.ERP.RICEFW"] || null;
-        const testingStatus = fields["Custom.TestingStatus"] || null;
-        const featureType = fields["Custom.BPFeatureType"] || null;
-        const area = fields["Custom.Area"] || null;
-
-        requestBody.properties.push({ field_id: constants.RequirementDescriptionFieldID, field_value: description });
-        requestBody.properties.push({ field_id: constants.RequirementStreamSquadFieldID, field_value: areaPath });
-
-        if (constants.RequirementComplexityFieldID && complexityValue) {
-            requestBody.properties.push({ field_id: constants.RequirementComplexityFieldID, field_value: complexityValue });
-        }
-        if (constants.RequirementWorkItemTypeFieldID && workItemTypeValue) {
-            requestBody.properties.push({ field_id: constants.RequirementWorkItemTypeFieldID, field_value: workItemTypeValue });
-        }
-        if (constants.RequirementPriorityFieldID && priorityValue) {
-            requestBody.properties.push({ field_id: constants.RequirementPriorityFieldID, field_value: priorityValue });
-        }
-        if (constants.RequirementTypeFieldID && typeValue) {
-            requestBody.properties.push({ field_id: constants.RequirementTypeFieldID, field_value: typeValue });
-        }
-        if (constants.RequirementAssignedToFieldID && assignedTo) {
-            requestBody.properties.push({ field_id: constants.RequirementAssignedToFieldID, field_value: assignedTo });
-        }
-        if (constants.RequirementIterationPathFieldID && iterationPath) {
-            requestBody.properties.push({ field_id: constants.RequirementIterationPathFieldID, field_value: iterationPath });
-        }
-        if (constants.RequirementApplicationNameFieldID && applicationName) {
-            requestBody.properties.push({ field_id: constants.RequirementApplicationNameFieldID, field_value: applicationName });
-        }
-
-        if (constants.RequirementStateFieldID && state) {
-            requestBody.properties.push({ field_id: constants.RequirementStateFieldID, field_value: state });
-        }
-        if (constants.RequirementReasonFieldID && reason) {
-            requestBody.properties.push({ field_id: constants.RequirementReasonFieldID, field_value: reason });
-        }
-        if (constants.RequirementAcceptanceCriteriaFieldID) {
-            requestBody.properties.push({ field_id: constants.RequirementAcceptanceCriteriaFieldID, field_value: acceptanceCriteria });
-        }
-        if (constants.RequirementPlainDescriptionFieldID) {
-            requestBody.properties.push({ field_id: constants.RequirementPlainDescriptionFieldID, field_value: fullDescription });
-        }
-        if (constants.RequirementProcessReleaseFieldID && processRelease) {
-            requestBody.properties.push({ field_id: constants.RequirementProcessReleaseFieldID, field_value: processRelease });
-        }
-        if (constants.RequirementRicefwIdFieldID && ricefwId) {
-            requestBody.properties.push({ field_id: constants.RequirementRicefwIdFieldID, field_value: ricefwId });
-        }
-        if (constants.RequirementRICEFWConfigurationFieldID && ricefwConfiguration) {
-            requestBody.properties.push({ field_id: constants.RequirementRICEFWConfigurationFieldID, field_value: ricefwConfiguration });
-        }
-        if (constants.RequirementTestingStatusFieldID && testingStatus) {
-            requestBody.properties.push({ field_id: constants.RequirementTestingStatusFieldID, field_value: testingStatus });
-        }
-        if (constants.RequirementFeatureTypeFieldID && featureType) {
-            requestBody.properties.push({ field_id: constants.RequirementFeatureTypeFieldID, field_value: featureType });
-        }
-        if (constants.RequirementAreaFieldID && area) {
-            requestBody.properties.push({ field_id: constants.RequirementAreaFieldID, field_value: area });
-        }
-
+    async function getRequirementDetails(requirementId) {
+        const url = `${normalizeBaseUrl(constants.ManagerURL)}/api/v3/projects/${constants.ProjectID}/requirements/${requirementId}`;
         try {
-            await put(url, requestBody);
-            console.log(`[Info] RICEFW requirement '${requirementId}' updated.`);
+            return await doRequest(url, "GET", null);
         } catch (error) {
-            console.error(`[Error] Failed to update RICEFW requirement '${requirementId}'.`, error);
             emitFriendlyFailure({
                 platform: "qTest",
                 objectType: "RICEFW/Feature",
                 objectId: requirementId,
-                detail: "Unable to update the qTest requirement from Azure DevOps."
+                detail: "Unable to retrieve the current qTest requirement details.",
+                dedupKey: `ricefw-details:${requirementId}`,
+            });
+            throw markFriendlyFailure(error);
+        }
+    }
+
+    function getPropertyById(requirement, fieldId) {
+        const properties = Array.isArray(requirement?.properties) ? requirement.properties : [];
+        return properties.find(property => String(property?.field_id) === String(fieldId)) || null;
+    }
+
+    function getRequirementParentId(requirement) {
+        return firstNonEmpty(
+            requirement?.parent_id,
+            requirement?.parentId,
+            requirement?.parent?.id,
+            requirement?.module_id,
+            requirement?.moduleId
+        );
+    }
+
+    function valuesEqual(left, right) {
+        const normalizeValue = value => {
+            if (value === undefined || value === null || value === "") return "";
+            return normalizeText(value).replace(/\s+/g, " ");
+        };
+        return normalizeValue(left) === normalizeValue(right);
+    }
+
+    function buildRequirementProperties(desiredState) {
+        const properties = [
+            { field_id: constants.RequirementDescriptionFieldID, field_value: desiredState.description },
+            { field_id: constants.RequirementStreamSquadFieldID, field_value: desiredState.areaPath },
+            { field_id: constants.RequirementWorkItemTypeFieldID, field_value: desiredState.workItemTypeValue },
+            { field_id: constants.RequirementStateFieldID, field_value: desiredState.stateValue || "" },
+            { field_id: constants.RequirementReasonFieldID, field_value: desiredState.reasonValue || "" },
+            { field_id: constants.RequirementAcceptanceCriteriaFieldID, field_value: desiredState.acceptanceCriteriaValue || "" },
+            { field_id: constants.RequirementPlainDescriptionFieldID, field_value: desiredState.plainDescriptionValue || "" },
+        ];
+
+        if (normalizeText(constants.RequirementComplexityFieldID) && desiredState.complexityValue) {
+            properties.push({ field_id: constants.RequirementComplexityFieldID, field_value: desiredState.complexityValue });
+        }
+        if (normalizeText(constants.RequirementPriorityFieldID) && desiredState.priorityValue) {
+            properties.push({ field_id: constants.RequirementPriorityFieldID, field_value: desiredState.priorityValue });
+        }
+        if (normalizeText(constants.RequirementTypeFieldID) && desiredState.typeValue) {
+            properties.push({ field_id: constants.RequirementTypeFieldID, field_value: desiredState.typeValue });
+        }
+        if (desiredState.assignedToUserId) {
+            properties.push({ field_id: constants.RequirementAssignedToFieldID, field_value: desiredState.assignedToUserId });
+        }
+        if (desiredState.iterationPathValue) {
+            properties.push({ field_id: constants.RequirementIterationPathFieldID, field_value: desiredState.iterationPathValue });
+        }
+        if (normalizeText(constants.RequirementApplicationNameFieldID) && desiredState.applicationNameValue) {
+            properties.push({ field_id: constants.RequirementApplicationNameFieldID, field_value: desiredState.applicationNameValue });
+        }
+        if (desiredState.processReleaseValue) {
+            properties.push({ field_id: constants.RequirementProcessReleaseFieldID, field_value: desiredState.processReleaseValue });
+        }
+        if (desiredState.ricefwIdValue) {
+            properties.push({ field_id: constants.RequirementRicefwIdFieldID, field_value: desiredState.ricefwIdValue });
+        }
+        if (desiredState.ricefwConfigurationValue) {
+            properties.push({ field_id: constants.RequirementRICEFWConfigurationFieldID, field_value: desiredState.ricefwConfigurationValue });
+        }
+        if (desiredState.testingStatusValue) {
+            properties.push({ field_id: constants.RequirementTestingStatusFieldID, field_value: desiredState.testingStatusValue });
+        }
+        if (desiredState.featureTypeFieldValue) {
+            properties.push({ field_id: constants.RequirementFeatureTypeFieldID, field_value: desiredState.featureTypeFieldValue });
+        }
+        if (desiredState.areaValue) {
+            properties.push({ field_id: constants.RequirementAreaFieldID, field_value: desiredState.areaValue });
+        }
+
+        return properties;
+    }
+
+    function evaluateRequirementUpdate(requirementDetails, desiredState) {
+        const desiredProperties = buildRequirementProperties(desiredState);
+        const requestBody = { name: desiredState.name, properties: desiredProperties };
+        const changedFields = [];
+
+        if (!valuesEqual(requirementDetails?.name, desiredState.name)) {
+            changedFields.push("name");
+        }
+
+        for (const property of desiredProperties) {
+            const currentProperty = getPropertyById(requirementDetails, property.field_id);
+            const currentValue = firstNonEmpty(currentProperty?.field_value, currentProperty?.field_value_name);
+            if (!valuesEqual(currentValue, property.field_value)) {
+                changedFields.push(`field:${property.field_id}`);
+            }
+        }
+
+        const currentParentId = getRequirementParentId(requirementDetails);
+        const parentChanged = desiredState.targetModuleId &&
+            String(currentParentId || "") !== String(desiredState.targetModuleId || "");
+        if (parentChanged) {
+            changedFields.push("parentId");
+        }
+
+        return { needsUpdate: changedFields.length > 0, changedFields, parentChanged, requestBody };
+    }
+
+    function emitWarnings(warnings, requirementContext = null, fallbackObjectId = null) {
+        for (const warning of warnings || []) {
+            if (!warning) continue;
+            emitFriendlyWarning({
+                ...warning,
+                objectId: requirementContext?.id || warning.objectId || fallbackObjectId || "Unknown",
+                objectPid: requirementContext?.pid || warning.objectPid,
             });
         }
     }
 
-    async function createRequirement(
-        name,
-        description,
-        fields,
-        complexityValue,
-        workItemTypeValue,
-        priorityValue,
-        typeValue,
-        targetModuleId
-    ) {
-        const url = `https://${constants.ManagerURL}/api/v3/projects/${constants.ProjectID}/requirements`;
-        const requestBody = {
-            name,
-            parent_id: targetModuleId,
-            properties: [],
+    async function buildDesiredRequirementState(eventData, requirementContext = null) {
+        const fields = getFields(eventData);
+        const workItemId = eventData?.resource?.workItemId || eventData?.resource?.id;
+        const warnings = [];
+        const adoAreaPath = getAdoFieldValue(fields, adoFieldRefs.areaPath);
+        const adoIterationPath = getAdoFieldValue(fields, adoFieldRefs.iterationPath);
+        const adoFeatureType = getAdoFieldValue(fields, adoFieldRefs.featureType);
+
+        const complexityValue = normalizeText(constants.RequirementComplexityFieldID)
+            ? await resolveOptionalRequirementFieldValue(constants.RequirementComplexityFieldID, getAdoFieldValue(fields, adoFieldRefs.complexity), "Complexity", requirementContext).then(result => { if (result.warningDetails) warnings.push(result.warningDetails); return result.value; })
+            : null;
+        const workItemTypeValue = await resolveRequirementFieldValue(constants.RequirementWorkItemTypeFieldID, "Feature", "Work Item Type", requirementContext);
+        const priorityValue = normalizeText(constants.RequirementPriorityFieldID)
+            ? await resolveOptionalRequirementFieldValue(constants.RequirementPriorityFieldID, getAdoFieldValue(fields, adoFieldRefs.priority), "Priority", requirementContext).then(result => { if (result.warningDetails) warnings.push(result.warningDetails); return result.value; })
+            : null;
+        const typeValue = normalizeText(constants.RequirementTypeFieldID)
+            ? await resolveOptionalRequirementFieldValue(constants.RequirementTypeFieldID, adoFeatureType, "Requirement Category", requirementContext).then(result => { if (result.warningDetails) warnings.push(result.warningDetails); return result.value; })
+            : null;
+
+        const assignedToResolution = await resolveRequirementAssignedToUserId(fields[adoFieldRefs.assignedTo], requirementContext);
+        if (assignedToResolution.warningDetails) warnings.push(assignedToResolution.warningDetails);
+
+        const iterationResolution = await resolveOptionalRequirementFieldValue(constants.RequirementIterationPathFieldID, adoIterationPath, "Iteration Path", requirementContext);
+        if (iterationResolution.warningDetails) warnings.push(iterationResolution.warningDetails);
+
+        let applicationNameValue = null;
+        if (normalizeText(constants.RequirementApplicationNameFieldID) && getAdoFieldValue(fields, adoFieldRefs.applicationName)) {
+            const resolution = await resolveOptionalRequirementFieldValue(constants.RequirementApplicationNameFieldID, getAdoFieldValue(fields, adoFieldRefs.applicationName), "Application Name", requirementContext);
+            applicationNameValue = resolution.value;
+            if (resolution.warningDetails) warnings.push(resolution.warningDetails);
+        }
+
+        const processReleaseResolution = await resolveOptionalRequirementFieldValue(constants.RequirementProcessReleaseFieldID, getAdoFieldValue(fields, adoFieldRefs.processRelease), "Process Release", requirementContext);
+        if (processReleaseResolution.warningDetails) warnings.push(processReleaseResolution.warningDetails);
+        const ricefwConfigurationResolution = await resolveOptionalRequirementFieldValue(constants.RequirementRICEFWConfigurationFieldID, getAdoFieldValue(fields, adoFieldRefs.ricefwConfiguration), "RICEFW Configuration", requirementContext);
+        if (ricefwConfigurationResolution.warningDetails) warnings.push(ricefwConfigurationResolution.warningDetails);
+        const testingStatusResolution = await resolveOptionalRequirementFieldValue(constants.RequirementTestingStatusFieldID, getAdoFieldValue(fields, adoFieldRefs.testingStatus), "Testing Status", requirementContext);
+        if (testingStatusResolution.warningDetails) warnings.push(testingStatusResolution.warningDetails);
+        const featureTypeFieldResolution = await resolveOptionalRequirementFieldValue(constants.RequirementFeatureTypeFieldID, adoFeatureType, "Feature Type", requirementContext);
+        if (featureTypeFieldResolution.warningDetails) warnings.push(featureTypeFieldResolution.warningDetails);
+        const areaResolution = await resolveOptionalRequirementFieldValue(constants.RequirementAreaFieldID, getAdoFieldValue(fields, adoFieldRefs.area), "Area", requirementContext);
+        if (areaResolution.warningDetails) warnings.push(areaResolution.warningDetails);
+        const stateResolution = await resolveOptionalRequirementFieldValue(constants.RequirementStateFieldID, getAdoFieldValue(fields, adoFieldRefs.state), "State", requirementContext);
+        if (stateResolution.warningDetails) warnings.push(stateResolution.warningDetails);
+        const reasonResolution = await resolveOptionalRequirementFieldValue(constants.RequirementReasonFieldID, getAdoFieldValue(fields, adoFieldRefs.reason), "Reason", requirementContext);
+        if (reasonResolution.warningDetails) warnings.push(reasonResolution.warningDetails);
+
+        return {
+            workItemId,
+            name: buildRequirementName(getNamePrefix(workItemId), eventData),
+            description: buildRequirementDescription(eventData),
+            areaPath: adoAreaPath,
+            complexityValue,
+            workItemTypeValue,
+            priorityValue,
+            typeValue,
+            assignedToUserId: assignedToResolution.userId,
+            iterationPathValue: iterationResolution.value,
+            applicationNameValue,
+            stateValue: stateResolution.value,
+            reasonValue: reasonResolution.value,
+            acceptanceCriteriaValue: getAdoFieldValue(fields, adoFieldRefs.acceptanceCriteria) || "",
+            plainDescriptionValue: getAdoFieldValue(fields, adoFieldRefs.description) || "",
+            processReleaseValue: processReleaseResolution.value,
+            ricefwIdValue: getAdoFieldValue(fields, adoFieldRefs.ricefwId) || null,
+            ricefwConfigurationValue: ricefwConfigurationResolution.value,
+            testingStatusValue: testingStatusResolution.value,
+            featureTypeFieldValue: featureTypeFieldResolution.value,
+            areaValue: areaResolution.value,
+            targetModuleId: await ensureModulePath(constants.FeatureParentID, adoAreaPath, adoIterationPath),
+            warnings,
         };
+    }
 
-        const areaPath = fields["System.AreaPath"] || "";
-        const assignedTo = normalizeAssignedTo(fields["System.AssignedTo"]);
-        const iterationPath = fields["System.IterationPath"] || null;
-        const state = fields["System.State"] || null;
-        const reason = fields["System.Reason"] || null;
-        const acceptanceCriteria = fields["Microsoft.VSTS.Common.AcceptanceCriteria"] || "";
-        const fullDescription = fields["System.Description"] || "";
-        const applicationName = fields["Custom.ApplicationName"] || null;
-        const processRelease = fields["Custom.ProcessRelease"] || null;
-        const ricefwId = fields["Custom.RICEFWID"] || null;
-        const ricefwConfiguration = fields["BP.ERP.RICEFW"] || null;
-        const testingStatus = fields["Custom.TestingStatus"] || null;
-        const featureType = fields["Custom.BPFeatureType"] || null;
-        const area = fields["Custom.Area"] || null;
-
-        requestBody.properties.push({ field_id: constants.RequirementDescriptionFieldID, field_value: description });
-        requestBody.properties.push({ field_id: constants.RequirementStreamSquadFieldID, field_value: areaPath });
-
-        if (constants.RequirementComplexityFieldID && complexityValue) {
-            requestBody.properties.push({ field_id: constants.RequirementComplexityFieldID, field_value: complexityValue });
-        }
-        if (constants.RequirementWorkItemTypeFieldID && workItemTypeValue) {
-            requestBody.properties.push({ field_id: constants.RequirementWorkItemTypeFieldID, field_value: workItemTypeValue });
-        }
-        if (constants.RequirementPriorityFieldID && priorityValue) {
-            requestBody.properties.push({ field_id: constants.RequirementPriorityFieldID, field_value: priorityValue });
-        }
-        if (constants.RequirementTypeFieldID && typeValue) {
-            requestBody.properties.push({ field_id: constants.RequirementTypeFieldID, field_value: typeValue });
-        }
-        if (constants.RequirementAssignedToFieldID && assignedTo) {
-            requestBody.properties.push({ field_id: constants.RequirementAssignedToFieldID, field_value: assignedTo });
-        }
-        if (constants.RequirementIterationPathFieldID && iterationPath) {
-            requestBody.properties.push({ field_id: constants.RequirementIterationPathFieldID, field_value: iterationPath });
-        }
-        if (constants.RequirementApplicationNameFieldID && applicationName) {
-            requestBody.properties.push({ field_id: constants.RequirementApplicationNameFieldID, field_value: applicationName });
+    async function updateRequirement(requirementToUpdate, desiredState) {
+        const requirementDetails = await getRequirementDetails(requirementToUpdate.id);
+        const evaluation = evaluateRequirementUpdate(requirementDetails, desiredState);
+        if (!evaluation.needsUpdate) {
+            console.log(`[Info] RICEFW requirement '${requirementToUpdate.id}' is already in sync. Skipping update.`);
+            emitWarnings(desiredState.warnings, requirementDetails, desiredState.workItemId);
+            return requirementDetails;
         }
 
-        if (constants.RequirementStateFieldID && state) {
-            requestBody.properties.push({ field_id: constants.RequirementStateFieldID, field_value: state });
-        }
-        if (constants.RequirementReasonFieldID && reason) {
-            requestBody.properties.push({ field_id: constants.RequirementReasonFieldID, field_value: reason });
-        }
-        if (constants.RequirementAcceptanceCriteriaFieldID) {
-            requestBody.properties.push({ field_id: constants.RequirementAcceptanceCriteriaFieldID, field_value: acceptanceCriteria });
-        }
-        if (constants.RequirementPlainDescriptionFieldID) {
-            requestBody.properties.push({ field_id: constants.RequirementPlainDescriptionFieldID, field_value: fullDescription });
-        }
-        if (constants.RequirementProcessReleaseFieldID && processRelease) {
-            requestBody.properties.push({ field_id: constants.RequirementProcessReleaseFieldID, field_value: processRelease });
-        }
-        if (constants.RequirementRicefwIdFieldID && ricefwId) {
-            requestBody.properties.push({ field_id: constants.RequirementRicefwIdFieldID, field_value: ricefwId });
-        }
-        if (constants.RequirementRICEFWConfigurationFieldID && ricefwConfiguration) {
-            requestBody.properties.push({ field_id: constants.RequirementRICEFWConfigurationFieldID, field_value: ricefwConfiguration });
-        }
-        if (constants.RequirementTestingStatusFieldID && testingStatus) {
-            requestBody.properties.push({ field_id: constants.RequirementTestingStatusFieldID, field_value: testingStatus });
-        }
-        if (constants.RequirementFeatureTypeFieldID && featureType) {
-            requestBody.properties.push({ field_id: constants.RequirementFeatureTypeFieldID, field_value: featureType });
-        }
-        if (constants.RequirementAreaFieldID && area) {
-            requestBody.properties.push({ field_id: constants.RequirementAreaFieldID, field_value: area });
-        }
+        const query = evaluation.parentChanged ? `?parentId=${desiredState.targetModuleId}` : "";
+        const url = `${normalizeBaseUrl(constants.ManagerURL)}/api/v3/projects/${constants.ProjectID}/requirements/${requirementToUpdate.id}${query}`;
 
         try {
-            await post(url, requestBody);
-            console.log(`[Info] RICEFW requirement created.`);
+            await put(url, evaluation.requestBody);
+            console.log(`[Info] RICEFW requirement '${requirementToUpdate.id}' updated.`);
+            emitWarnings(desiredState.warnings, requirementDetails, desiredState.workItemId);
         } catch (error) {
-            console.error(`[Error] Failed to create RICEFW requirement.`, error);
             emitFriendlyFailure({
                 platform: "qTest",
                 objectType: "RICEFW/Feature",
-                objectId: "New",
-                detail: "Unable to create the qTest requirement from Azure DevOps."
+                objectId: requirementToUpdate.id,
+                objectPid: requirementToUpdate?.pid || requirementDetails?.pid,
+                detail: "Unable to update the qTest requirement from Azure DevOps.",
+                dedupKey: `ricefw-update:${requirementToUpdate.id}`,
             });
+            throw markFriendlyFailure(error);
+        }
+    }
+
+    async function createRequirement(desiredState) {
+        const url = `${normalizeBaseUrl(constants.ManagerURL)}/api/v3/projects/${constants.ProjectID}/requirements`;
+        const requestBody = {
+            name: desiredState.name,
+            parent_id: desiredState.targetModuleId,
+            properties: buildRequirementProperties(desiredState),
+        };
+
+        try {
+            await post(url, requestBody);
+            console.log("[Info] RICEFW requirement created.");
+            emitWarnings(desiredState.warnings, null, desiredState.workItemId);
+        } catch (error) {
+            emitFriendlyFailure({
+                platform: "qTest",
+                objectType: "RICEFW/Feature",
+                objectId: desiredState.workItemId || "New",
+                detail: "Unable to create the qTest requirement from Azure DevOps.",
+                dedupKey: `ricefw-create:${desiredState.workItemId || "unknown"}`,
+            });
+            throw markFriendlyFailure(error);
         }
     }
 
     async function deleteRequirement(requirementToDelete) {
         const requirementId = requirementToDelete.id;
-        const url = `https://${constants.ManagerURL}/api/v3/projects/${constants.ProjectID}/requirements/${requirementId}`;
+        const url = `${normalizeBaseUrl(constants.ManagerURL)}/api/v3/projects/${constants.ProjectID}/requirements/${requirementId}`;
         try {
             await doRequest(url, "DELETE", null);
             console.log(`[Info] Requirement '${requirementId}' deleted.`);
@@ -723,109 +1062,98 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         DELETED: "workitem.deleted",
     };
 
-    if (!isRicefwFeature(event)) {
-        console.log("[Info] Work item is not a RICEFW Feature. Exiting.");
-        return;
-    }
+    let workItemId = null;
+    let requirementToUpdate = null;
 
-    let workItemId;
-    let requirementToUpdate;
+    try {
+        if (!validateRequiredConfiguration()) return;
 
-    switch (event.eventType) {
-        case eventType.CREATED:
-            workItemId = event.resource.id;
-            console.log(`[Info] Create RICEFW Feature event received for 'WI${workItemId}'`);
-            break;
+        switch (event.eventType) {
+            case eventType.CREATED:
+                workItemId = event?.resource?.id;
+                console.log(`[Info] Create RICEFW Feature event received for 'WI${workItemId}'`);
+                break;
 
-        case eventType.UPDATED:
-            workItemId = event.resource.workItemId;
-            console.log(`[Info] Update RICEFW Feature event received for 'WI${workItemId}'`);
-            if (!shouldProcessRicefwUpdate(event)) {
+            case eventType.UPDATED:
+                workItemId = event?.resource?.workItemId;
+                console.log(`[Info] Update RICEFW Feature event received for 'WI${workItemId}'`);
+                if (!shouldProcessRicefwUpdate(event)) return;
+                {
+                    const getReqResult = await getRequirementByWorkItemId(workItemId);
+                    if (getReqResult.failed) return;
+                    const allowCreationOnUpdate = String(constants.AllowCreationOnUpdate).toLowerCase() === "true";
+                    if (!getReqResult.requirement && !allowCreationOnUpdate) {
+                        console.log("[Info] Creation of RICEFW Requirement on update event not enabled. Exiting.");
+                        return;
+                    }
+                    requirementToUpdate = getReqResult.requirement;
+                }
+                break;
+
+            case eventType.DELETED:
+                workItemId = event?.resource?.id;
+                console.log(`[Info] Delete RICEFW Feature event received for 'WI${workItemId}'`);
+                {
+                    const getReq = await getRequirementByWorkItemId(workItemId);
+                    if (getReq.failed || !getReq.requirement) return;
+                    await deleteRequirement(getReq.requirement);
+                    return;
+                }
+
+            default:
+                emitFriendlyFailure({
+                    platform: "ADO",
+                    objectType: "RICEFW/Feature",
+                    objectId: workItemId || "Unknown",
+                    detail: `Unsupported work item event type '${event.eventType}'.`,
+                    dedupKey: `ricefw-eventtype:${event.eventType}`,
+                });
                 return;
-            }
-            const getReqResult = await getRequirementByWorkItemId(workItemId);
-            if (getReqResult.failed) return;
-            if (!getReqResult.requirement && !constants.AllowCreationOnUpdate) {
-                console.log("[Info] Creation of RICEFW Requirement on update event not enabled. Exiting.");
-                return;
-            }
-            requirementToUpdate = getReqResult.requirement;
-            break;
+        }
 
-        case eventType.DELETED:
-            workItemId = event.resource.id;
-            console.log(`[Info] Delete RICEFW Feature event received for 'WI${workItemId}'`);
-            const getReq = await getRequirementByWorkItemId(workItemId);
-            if (getReq.failed || !getReq.requirement) return;
-            await deleteRequirement(getReq.requirement);
+        if (!isRicefwFeature(event)) {
+            if (workItemId && event.eventType === eventType.UPDATED) {
+                const requirementSearch = requirementToUpdate ? { failed: false, requirement: requirementToUpdate } : await getRequirementByWorkItemId(workItemId);
+                if (!requirementSearch.failed && requirementSearch.requirement) {
+                    emitFriendlyWarning({
+                        platform: "ADO",
+                        objectType: "RICEFW/Feature",
+                        objectId: workItemId,
+                        objectPid: requirementSearch.requirement.pid,
+                        detail: "The work item no longer meets the configured RICEFW/Feature criteria. The existing qTest item was left unchanged pending business-rule confirmation.",
+                        dedupKey: `ricefw-out-of-scope:${workItemId}`,
+                    });
+                } else {
+                    console.log("[Info] Work item is not a RICEFW Feature. Exiting.");
+                }
+            } else {
+                console.log("[Info] Work item is not a RICEFW Feature. Exiting.");
+            }
             return;
+        }
 
-        default:
-            console.error(`[Error] Unknown workitem event type '${event.eventType}' for 'WI${workItemId}'`);
+        const desiredState = await buildDesiredRequirementState(event, requirementToUpdate);
+        console.log(`[Debug] RICEFW Requirement Name: ${desiredState.name}`);
+        console.log(`[Debug] RICEFW Requirement Description: ${desiredState.description}`);
+        console.log(`[Debug] RICEFW Target Module ID: ${desiredState.targetModuleId}`);
+        console.log(`[Debug] RICEFW Desired Properties: ${safeJson(buildRequirementProperties(desiredState))}`);
+
+        if (requirementToUpdate) {
+            await updateRequirement(requirementToUpdate, desiredState);
+        } else {
+            await createRequirement(desiredState);
+        }
+    } catch (error) {
+        if (!error?.__friendlyFailureEmitted) {
             emitFriendlyFailure({
-                platform: "ADO",
+                platform: "qTest",
                 objectType: "RICEFW/Feature",
                 objectId: workItemId || "Unknown",
-                detail: `Unsupported work item event type '${event.eventType}'.`
+                objectPid: requirementToUpdate?.pid,
+                detail: "Unexpected error occurred during RICEFW requirement sync.",
+                dedupKey: `ricefw-fatal:${workItemId || "unknown"}`,
             });
-            return;
-    }
-
-    const fields = getFields(event);
-    const adoAreaPath = fields["System.AreaPath"] || "";
-    const adoComplexity = fields["Custom.Complexity"];
-    const adoPriority = fields["Microsoft.VSTS.Common.Priority"];
-    const adoRequirementCategory = fields["Custom.BPFeatureType"] || null;
-    const qtestComplexityValue = await resolveRequirementFieldValue(
-        constants.RequirementComplexityFieldID,
-        adoComplexity,
-        "Complexity"
-    );
-    const qtestWorkItemTypeValue = await resolveRequirementFieldValue(
-        constants.RequirementWorkItemTypeFieldID,
-        "Feature",
-        "Work Item Type"
-    );
-    const qtestPriorityValue = await resolveRequirementFieldValue(
-        constants.RequirementPriorityFieldID,
-        adoPriority,
-        "Priority"
-    );
-    const qtestTypeValue = await resolveRequirementFieldValue(
-        constants.RequirementTypeFieldID,
-        adoRequirementCategory,
-        "Requirement Category"
-    );
-
-    const rootModuleId = constants.FeatureParentID;
-    const iterationPath = fields["System.IterationPath"] || null;
-    const targetModuleId = await ensureModulePath(rootModuleId, adoAreaPath, iterationPath);
-    const namePrefix = getNamePrefix(workItemId);
-    const requirementDescription = buildRequirementDescription(event);
-    const requirementName = buildRequirementName(namePrefix, event);
-
-    if (requirementToUpdate) {
-        await updateRequirement(
-            requirementToUpdate,
-            requirementName,
-            requirementDescription,
-            fields,
-            qtestComplexityValue,
-            qtestWorkItemTypeValue,
-            qtestPriorityValue,
-            qtestTypeValue,
-            targetModuleId
-        );
-    } else {
-        await createRequirement(
-            requirementName,
-            requirementDescription,
-            fields,
-            qtestComplexityValue,
-            qtestWorkItemTypeValue,
-            qtestPriorityValue,
-            qtestTypeValue,
-            targetModuleId
-        );
+        }
+        console.error(error);
     }
 };

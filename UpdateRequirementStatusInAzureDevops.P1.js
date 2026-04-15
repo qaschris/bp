@@ -1,10 +1,13 @@
-const { Webhooks } = require('@qasymphony/pulse-sdk');
-const axios = require('axios');
+const { Webhooks } = require("@qasymphony/pulse-sdk");
+const axios = require("axios");
 
 exports.handler = async function ({ event, constants, triggers }, context, callback) {
+  const emittedMessageKeys = new Set();
+
   function emitEvent(name, payload) {
-    return (t = triggers.find(t => t.name === name))
-      ? new Webhooks().invoke(t, payload)
+    const trigger = triggers.find(item => item.name === name);
+    return trigger
+      ? new Webhooks().invoke(trigger, payload)
       : console.error(`[ERROR]: (emitEvent) Webhook named '${name}' not found.`);
   }
 
@@ -17,12 +20,56 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
       ? ` Value: ${details.fieldValue}.`
       : "";
     const detail = details.detail || "Sync failed.";
+    const dedupKey = details.dedupKey || `failure|${platform}|${objectType}|${objectId}|${fieldName}|${fieldValue}|${detail}`;
 
     const message =
       `Sync failed. Platform: ${platform}. Object Type: ${objectType}. Object ID: ${objectId}.${fieldName}${fieldValue} Detail: ${detail}`;
 
+    if (emittedMessageKeys.has(dedupKey)) return false;
+    emittedMessageKeys.add(dedupKey);
     console.error(`[Error] ${message}`);
-    emitEvent('ChatOpsEvent', { message });
+    emitEvent("ChatOpsEvent", { message });
+    return true;
+  }
+
+  function normalizeText(value) {
+    return value == null
+      ? ""
+      : String(value)
+        .normalize("NFKC")
+        .replace(/[\u200B-\u200D\uFEFF]/g, "")
+        .replace(/<0x(?:200b|200c|200d|feff)>/gi, "")
+        .trim();
+  }
+
+  function normalizeBaseUrl(value) {
+    const raw = normalizeText(value).replace(/\/+$/, "");
+    if (!raw) throw new Error("A qTest base URL is required.");
+    return raw.startsWith("http://") || raw.startsWith("https://") ? raw : `https://${raw}`;
+  }
+
+  function validateRequiredConfiguration() {
+    const missingConstants = [
+      "ProjectID",
+      "RequirementStatusFieldID",
+      "AzDoTestingStatusFieldRef",
+      "AZDO_TOKEN",
+      "ManagerURL",
+      "AzDoProjectURL",
+      "QTEST_TOKEN",
+    ].filter(name => !normalizeText(constants[name]));
+
+    if (!missingConstants.length) return true;
+
+    emitFriendlyFailure({
+      platform: "Pulse",
+      objectType: "Configuration",
+      objectId: "Unknown",
+      fieldName: missingConstants.join(", "),
+      detail: "Required requirement status sync constants are missing in Pulse.",
+      dedupKey: `requirement-status-config:${missingConstants.join("|")}`
+    });
+    return false;
   }
 
   function getLabelById(id) {
@@ -102,6 +149,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
   try {
     console.log(`[Info] Incoming event: ${JSON.stringify(event, null, 2)}`);
+    if (!validateRequiredConfiguration()) return;
 
     const requirementId = event.requirement && event.requirement.id;
     const projectId = event.requirement && event.requirement.project_id;
@@ -126,26 +174,15 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
     const statusFieldId = constants.RequirementStatusFieldID;
     const adoToken = constants.AZDO_TOKEN;
-    const managerUrl = constants.ManagerURL;
+    const managerUrl = normalizeBaseUrl(constants.ManagerURL);
     const adoProjectUrl = constants.AzDoProjectURL;
-    const adoTestingStatusFieldRef = constants.AzDoTestingStatusFieldRef || "Custom.TestingStatus";
+    const adoTestingStatusFieldRef = constants.AzDoTestingStatusFieldRef;
 
     if (!shouldProcessStatusEvent(event, statusFieldId)) {
       return;
     }
 
-    const statusMap = {
-      11163: "SIT 1 In Progress",
-      11164: "SIT 1 Complete",
-      11165: "UAT In Progress",
-      11166: "UAT Complete",
-      11219: "SIT Dry Run In Progress",
-      11220: "SIT Dry Run Complete",
-      11236: "SIT 2 In Progress",
-      11235: "SIT 2 Complete"
-    };
-
-    const reqUrl = `https://${managerUrl}/api/v3/projects/${projectId}/requirements/${requirementId}`;
+    const reqUrl = `${managerUrl}/api/v3/projects/${projectId}/requirements/${requirementId}`;
     let requirement;
 
     try {
@@ -197,7 +234,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
     console.log(`[Info] qTest Status ID: ${qtestStatusId}, Label: '${qtestStatusLabel || "Unknown"}'`);
 
-    const adoStatus = statusMap[qtestStatusId];
+    const adoStatus = normalizeText(qtestStatusLabel || getLabelById(qtestStatusId));
     if (!adoStatus) {
       console.log(`[Info] No ADO mapping found for qTest status ID '${qtestStatusId}', skipping update.`);
       return;
@@ -275,7 +312,8 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         objectId: workItemId,
         fieldName: "Testing Status",
         fieldValue: adoStatus,
-        detail: "Unable to update Azure DevOps testing status from qTest."
+        detail: "Unable to update Azure DevOps testing status from qTest.",
+        dedupKey: `requirement-status-patch:${workItemId}:${adoStatus}`
       });
     }
 

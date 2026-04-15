@@ -1,6 +1,10 @@
 # Requirement And RICEFW Workflow Hardening Plan
 
-This note captures the current strategy for improving the requirement-related workflows in a similar way to the recent defect workflow hardening pass.
+Updated: 2026-04-14
+
+This document is the working plan for bringing the Requirement and
+RICEFW/Feature workflows up to the same standard as the recent Defect workflow
+hardening pass. It is meant to be actionable, not just descriptive.
 
 ## Scope
 
@@ -13,120 +17,246 @@ Files in scope:
 Primary goals:
 
 - move ADO field access to Pulse constant-based refs
-- improve qTest field-value handling using the Fields API where labels align
-- keep explicit mappings only where ADO and qTest business values truly differ
-- improve loop prevention and no-op detection
-- standardize ChatOps warnings/failures and avoid duplicate reporting
-- correct requirement assignee handling to use active project users only
+- dynamically resolve qTest constrained field values where labels should align
+- keep explicit mappings only where business values truly differ
+- improve requirement loop prevention and no-op detection
+- standardize ChatOps warnings and failures
+- correct qTest requirement assignee handling to use active project users only
+- reduce unnecessary qTest writes and module moves
 
 ## Current Findings
 
-### Standard Requirement Sync
+### 1. Standard Requirement Sync
 
-`SyncRequirementFromAzureDevopsWorkItem.P1.js` still contains:
+`SyncRequirementFromAzureDevopsWorkItem.P1.js` is functionally complete, but it
+still has several structural gaps:
 
-- inline ADO field refs throughout the script
-- direct string-based qTest `AssignedTo` handling instead of project-scoped user resolution
-- only partial qTest field resolution through the Fields API
-- duplicated create/update payload logic
-- no true no-op detection before updating qTest
-- failure-only ChatOps with no dedupe or warning helper
+- ADO field refs are still hard-coded throughout the script.
+- qTest `AssignedTo` is still handled as normalized free text rather than by
+  resolving against active users in the project.
+- Several qTest requirement fields are written as raw values instead of being
+  resolved through the qTest Fields API.
+- The script still rebuilds and sends broad qTest payloads instead of comparing
+  current vs desired state first.
+- The update URL always includes `parentId=${targetModuleId}`, which means the
+  item can be re-parented even when the module does not actually need to change.
+- ChatOps is still older style: mostly failure-oriented, no warning helper, and
+  no dedupe pattern like the one now used in the Defect workflows.
 
-### RICEFW / Feature Sync
+Fields currently handled too loosely:
 
-`SyncRICEFWFeatureFromAzureDevops.js` has the same structural issues as the standard requirement sync, plus:
+- `AssignedTo`
+- `Iteration Path`
+- `Application Name`
+- `Fit Gap`
+- `BP Entity`
+- any other constrained requirement property whose value is currently sent
+  directly from ADO to qTest
 
-- immediate exit when the work item no longer qualifies as a RICEFW Feature
-- no explicit handling for previously-synced qTest requirements that later fall out of scope
-- many likely-constrained qTest fields written as raw values
+### 2. RICEFW / Feature Sync
 
-### qTest -> ADO Requirement Status Sync
+`SyncRICEFWFeatureFromAzureDevops.js` has the same foundational issues as the
+standard requirement sync, plus a few RICEFW-specific gaps:
 
-`UpdateRequirementStatusInAzureDevops.P1.js` is narrower, but still needs:
+- It writes many likely-constrained qTest fields as raw values:
+  - `AssignedTo`
+  - `Iteration Path`
+  - `Application Name`
+  - `Process Release`
+  - `RICEFW ID`
+  - `RICEFW Configuration`
+  - `Testing Status`
+  - `Feature Type`
+  - `Area`
+- It exits immediately if the work item no longer qualifies as a RICEFW Feature.
+- That means a previously-synced qTest requirement can be left behind with no
+  explicit lifecycle handling if the source item later becomes out-of-scope.
+- Like the standard requirement sync, it does not yet use a clean desired-state
+  plus no-op-detection pattern.
 
-- constant-based ADO field ref validation
-- deduped ChatOps helpers
-- better label-based status handling instead of relying only on hard-coded qTest ids
-- the same cleanup/validation style used in the defect workflows
+### 3. qTest -> ADO Requirement Status Sync
 
-## Implementation Strategy
+`UpdateRequirementStatusInAzureDevops.P1.js` is narrower, but still needs
+cleanup:
 
-### Phase 1: Shared Foundation
+- it uses a hard-coded fallback for the ADO testing-status field ref
+- it still depends on a hard-coded qTest status-id map
+- it does have useful loop-prevention checks already, but it has not yet been
+  brought into the same constant-validation and ChatOps pattern as the Defect
+  flows
 
-Apply the same helper pattern used in the defect workflows:
+Current strengths we should preserve:
 
-- `normalizeText` with Unicode-safe normalization
+- it checks changed field ids and skips when the qTest event does not mention
+  the status field
+- it skips updates from the configured sync user
+- it compares current ADO testing status before patching
+
+## Hardening Strategy
+
+## Phase 1: Shared Foundation
+
+The first pass should standardize the helper layer across all three scripts.
+
+Core helpers to introduce or align:
+
+- `normalizeText`
+- Unicode-safe label normalization
 - deduped `emitFriendlyFailure`
 - deduped `emitFriendlyWarning`
 - `buildAdoFieldRefs()` from Pulse constants only
 - `validateRequiredConfiguration()` up front
 - `getAdoFieldValue()` for ADO reads
-- qTest field resolution helpers with optional inactive-value support
-- qTest project-user lookup using `/api/v3/projects/{projectId}/users?inactive=false`
+- qTest field metadata lookup and option resolution helpers
+- qTest project-user lookup via:
+  - `/api/v3/projects/{projectId}/users?inactive=false`
 
-User matching rules:
+Requirement user matching rules should mirror the Defect decision:
 
-- match only `username`
-- match only `ldap_username`
-- match only `external_user_name`
+- match `username`
+- match `ldap_username`
+- match `external_user_name`
 - do not match on `email`
 
-### Phase 2: Standard Requirement Sync
+Recommendation:
 
-Refactor `SyncRequirementFromAzureDevopsWorkItem.P1.js` to:
+- add one configured qTest fallback identity for requirements as well, so the
+  requirement workflows behave consistently with defects when assignee lookup
+  fails
 
-- build one normalized desired qTest requirement state
-- dynamically resolve all constrained qTest fields where labels should match
-- warn and skip optional unresolved fields rather than failing the whole sync
-- fetch the current qTest requirement on update and compare before writing
+## Phase 2: Standard Requirement Sync
+
+Refactor `SyncRequirementFromAzureDevopsWorkItem.P1.js` around one desired-state
+model.
+
+Target structure:
+
+1. validate constants
+2. build constant-based ADO field ref map
+3. collect ADO source values
+4. resolve qTest constrained values
+5. determine target module id
+6. fetch current qTest requirement when updating
+7. compare current vs desired
+8. write only when a real change exists
+
+Required behavior changes:
+
+- replace inline ADO refs with constants only
+- resolve qTest constrained values dynamically instead of sending raw labels
+- resolve `AssignedTo` through active project users
+- treat optional unresolved values as warning-and-skip, not hard failure
 - include `parentId` only when the target module actually changes
-- keep the ADO updated-field filter, but add true no-op detection
+- suppress no-op writes so unchanged ADO updates do not rewrite qTest
 
-Fields that likely need dynamic qTest resolution:
+Fields that should likely move to dynamic qTest resolution:
 
-- complexity
-- work item type
-- priority
-- requirement category / type
-- application name
-- fit gap
-- BP entity
+- `Complexity`
+- `Work Item Type`
+- `Priority`
+- `Requirement Category`
+- `Application Name`
+- `Fit Gap`
+- `BP Entity`
+- `Iteration Path`
 
-Assigned To should stop using free-text normalization and instead:
+Module handling strategy:
 
-- resolve against active project users
-- fall back to the configured service identity if needed
-- emit a warning only if the overall qTest update succeeds
+- keep the current release-folder + area-path module derivation pattern
+- continue deriving the release folder from ADO `IterationPath`
+- only move the qTest requirement when the computed module id differs from the
+  current parent
 
-### Phase 3: RICEFW / Feature Sync
+## Phase 3: RICEFW / Feature Sync
 
-Refactor `SyncRICEFWFeatureFromAzureDevops.js` using the same structure as the standard requirement sync.
+Refactor `SyncRICEFWFeatureFromAzureDevops.js` to match the standard
+Requirement sync structure, then add RICEFW-specific lifecycle handling.
 
-Additional RICEFW-specific work:
+Core changes:
 
-- separate “is this event in scope for sync” from “what should happen to an already-synced qTest requirement”
-- define behavior for items that were synced previously but later become rejected, cancelled, or otherwise out of scope
-- dynamically resolve constrained qTest values for:
-  - testing status
-  - feature type
-  - area
-  - RICEFW configuration
-  - any other constrained custom fields
+- move to constant-based ADO field refs
+- resolve constrained qTest fields dynamically
+- use active project-user lookup for `AssignedTo`
+- add true no-op detection before qTest writes
+- only move modules when the target parent actually changes
 
-### Phase 4: qTest -> ADO Requirement Status Sync
+RICEFW-specific fields that should be treated as constrained unless proven
+otherwise:
 
-Refactor `UpdateRequirementStatusInAzureDevops.P1.js` to:
+- `Testing Status`
+- `Feature Type`
+- `Area`
+- `RICEFW Configuration`
+- `Process Release`
+
+Lifecycle decision that still needs to be made explicit:
+
+- if a work item was previously synced as a RICEFW Feature but later becomes
+  rejected, cancelled, or otherwise out-of-scope, should we:
+  - delete the qTest requirement
+  - leave it in place and stop syncing
+  - mark it somehow and keep it visible
+
+Current recommendation:
+
+- do not silently exit without handling previously-synced items
+- make the out-of-scope behavior explicit in code once the business rule is
+  confirmed
+
+## Phase 4: qTest -> ADO Requirement Status Sync
+
+Refactor `UpdateRequirementStatusInAzureDevops.P1.js` with the same cleanup
+style used in the Defect scripts.
+
+Required changes:
 
 - validate required constants early
 - use deduped ChatOps helpers
 - rely on the constant-based ADO testing-status field ref only
-- prefer label-based qTest status handling where possible
-- keep explicit status mapping only where business values truly differ
-- retain the current loop-prevention checks and tighten them where helpful
+- tighten log messages and error classification
 
-## ADO Field Ref Constants Needed
+Status handling strategy:
 
-Reuse existing constants where already defined:
+- prefer label-aware handling where possible
+- keep explicit mapping where the business values truly differ
+- do not remove the changed-field loop protection
+- do not remove the sync-user protection
+
+Because this script is intentionally narrow, it does not need the full module
+or requirement-payload machinery of the other two scripts.
+
+## Field Handling Model
+
+The requirement pass should follow the same hybrid model now used on defects.
+
+Use explicit business mappings only when labels do not truly align:
+
+- testing-status values, if business semantics differ
+- any RICEFW field with customer-specific terminology differences
+
+Use dynamic qTest field resolution when labels are expected to align:
+
+- complexity
+- requirement category
+- application name
+- fit gap
+- entity
+- testing status, if labels really do align
+- feature type
+- area
+- iteration path
+
+If an optional constrained qTest value cannot be resolved:
+
+- warn
+- skip that field
+- continue the overall sync if everything else is valid
+
+## Constants To Add Or Verify
+
+### ADO Field Ref Constants
+
+Reuse where already defined:
 
 - `AzDoTitleFieldRef`
 - `AzDoAreaPathFieldRef`
@@ -134,7 +264,7 @@ Reuse existing constants where already defined:
 - `AzDoStateFieldRef`
 - `AzDoPriorityFieldRef`
 
-Add or verify these requirement-related ADO field refs:
+Add or verify for standard Requirements:
 
 - `AzDoWorkItemTypeFieldRef` = `System.WorkItemType`
 - `AzDoIterationPathFieldRef` = `System.IterationPath`
@@ -146,6 +276,9 @@ Add or verify these requirement-related ADO field refs:
 - `AzDoApplicationNameFieldRef` = `Custom.ApplicationName`
 - `AzDoFitGapFieldRef` = `BP.ERP.FitGap`
 - `AzDoEntityFieldRef` = `Custom.Entity`
+
+Add or verify for RICEFW / Feature:
+
 - `AzDoProcessReleaseFieldRef` = `Custom.ProcessRelease`
 - `AzDoRICEFWIdFieldRef` = `Custom.RICEFWID`
 - `AzDoTestingStatusFieldRef` = `Custom.TestingStatus`
@@ -153,14 +286,91 @@ Add or verify these requirement-related ADO field refs:
 - `AzDoAreaFieldRef` = `Custom.Area`
 - `AzDoRICEFWConfigurationFieldRef` = `BP.ERP.RICEFW`
 
+### qTest Field ID Constants To Verify
+
+Standard Requirement:
+
+- `RequirementComplexityFieldID`
+- `RequirementWorkItemTypeFieldID`
+- `RequirementPriorityFieldID`
+- `RequirementTypeFieldID`
+- `RequirementAssignedToFieldID`
+- `RequirementIterationPathFieldID`
+- `RequirementApplicationNameFieldID`
+- `RequirementFitGapFieldID`
+- `RequirementBPEntityFieldID`
+- `RequirementStreamSquadFieldID`
+
+RICEFW / Feature:
+
+- `RequirementProcessReleaseFieldID`
+- `RequirementRicefwIdFieldID`
+- `RequirementRICEFWConfigurationFieldID`
+- `RequirementTestingStatusFieldID`
+- `RequirementFeatureTypeFieldID`
+- `RequirementAreaFieldID`
+
+Status Bridge:
+
+- `RequirementStatusFieldID`
+- `AzDoTestingStatusFieldRef`
+
+## ChatOps And Error Handling Rules
+
+Requirement workflows should follow the same behavior standard now used in the
+Defect scripts:
+
+- configuration problems should fail early and once
+- informational business-rule skips should not be failures
+- optional unresolved values should be warnings only if the overall sync succeeds
+- duplicate user-facing failure messages for the same root cause should be
+  deduped
+
+Object identity conventions:
+
+- ADO messages: work item id
+- qTest messages: requirement id plus pid when available
+
 ## Recommended Execution Order
 
 1. `SyncRequirementFromAzureDevopsWorkItem.P1.js`
 2. `SyncRICEFWFeatureFromAzureDevops.js`
 3. `UpdateRequirementStatusInAzureDevops.P1.js`
 
-## Open Questions For Later
+This order keeps the broadest shared patterns first and leaves the narrow
+status bridge last.
 
-- What should happen when a previously-synced RICEFW Feature no longer qualifies as RICEFW?
-- Which requirement-side qTest fields are truly constrained in the customer project versus free text?
-- Should requirement-side `AssignedTo` also use a specific qTest service-account fallback identity, matching the defect workflow approach?
+## Suggested Test Matrix
+
+For the standard Requirement workflow:
+
+- create from ADO into qTest
+- update with no meaningful changes
+- update with module move required
+- update with unresolved optional constrained field
+- update with unresolved assignee
+
+For RICEFW / Feature:
+
+- create qualifying feature
+- update qualifying feature
+- update feature that becomes out-of-scope
+- delete event for previously-synced feature
+
+For qTest -> ADO status:
+
+- qTest event where only non-status fields changed
+- qTest event from sync user
+- qTest event with real status change
+- no-op case where ADO already has the desired testing status
+
+## Open Decisions
+
+- What should happen when a previously-synced RICEFW item later becomes
+  rejected, cancelled, or otherwise non-qualifying?
+- What should the configured qTest fallback assignee identity be for
+  Requirement workflows?
+- Which requirement-side qTest fields in the customer project are definitely
+  constrained vs free text?
+- Should any requirement-side status values remain explicitly mapped for
+  business reasons, or can more of them move to label-based matching?
