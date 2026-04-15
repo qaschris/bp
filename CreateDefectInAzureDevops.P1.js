@@ -312,6 +312,114 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         }
     }
 
+    function normalizeAdoIterationPath(value) {
+        return normalizeText(value).replace(/[\\/]+/g, "\\");
+    }
+
+    async function getAdoIterationPathLookup() {
+        const cacheKey = `adoIterationPaths:${constants.AzDoProjectURL}`;
+        if (qtestMetadataCache[cacheKey]) {
+            return qtestMetadataCache[cacheKey];
+        }
+
+        const baseUrl = encodeIfNeeded(constants.AzDoProjectURL);
+        const url = `${baseUrl}/_apis/wit/classificationnodes/iterations?$depth=10&api-version=6.0`;
+        const encodedToken = Buffer.from(`:${constants.AZDO_TOKEN}`).toString("base64");
+        console.log(`[Debug] Fetching ADO Iteration Paths from '${url}'.`);
+
+        const response = await axios.get(url, {
+            headers: {
+                Authorization: `Basic ${encodedToken}`,
+            },
+        });
+
+        const pathLookup = new Map();
+        const visitNode = (node) => {
+            if (!node) {
+                return;
+            }
+
+            const nodePath = normalizeAdoIterationPath(node.path);
+            if (nodePath) {
+                pathLookup.set(normalizeLookupLabel(nodePath), nodePath);
+            }
+
+            if (Array.isArray(node.children)) {
+                node.children.forEach(visitNode);
+            }
+        };
+
+        visitNode(response.data);
+        qtestMetadataCache[cacheKey] = pathLookup;
+        return pathLookup;
+    }
+
+    async function resolveAdoIterationPathForDefect(rawIterationPath) {
+        const requestedIterationPath = normalizeAdoIterationPath(rawIterationPath);
+        const configuredDefault = normalizeAdoIterationPath(
+            constants.IterationPath || constants.AzDoDefaultIterationPath
+        );
+
+        if (!adoFieldRefs.iterationPath) {
+            return {
+                value: requestedIterationPath || configuredDefault,
+                warningDetail: null,
+                warningValue: null,
+            };
+        }
+
+        try {
+            const pathLookup = await getAdoIterationPathLookup();
+            const normalizedRequested = normalizeLookupLabel(requestedIterationPath);
+            const normalizedDefault = normalizeLookupLabel(configuredDefault);
+
+            if (requestedIterationPath && pathLookup.has(normalizedRequested)) {
+                return {
+                    value: pathLookup.get(normalizedRequested),
+                    warningDetail: null,
+                    warningValue: null,
+                };
+            }
+
+            if (configuredDefault) {
+                const resolvedDefault = pathLookup.get(normalizedDefault) || configuredDefault;
+                const warningDetail = requestedIterationPath
+                    ? `qTest Iteration Path '${requestedIterationPath}' was not found in Azure DevOps. Defaulted ADO Iteration Path to '${resolvedDefault}'.`
+                    : `Iteration Path was blank in qTest. Defaulted ADO Iteration Path to '${resolvedDefault}'.`;
+
+                console.log(`[Warn] ${warningDetail}`);
+                return {
+                    value: resolvedDefault,
+                    warningDetail,
+                    warningValue: requestedIterationPath || "(blank)",
+                };
+            }
+
+            if (requestedIterationPath) {
+                const warningDetail =
+                    `qTest Iteration Path '${requestedIterationPath}' was not found in Azure DevOps, ` +
+                    `and no default IterationPath constant is configured. Iteration Path sync was skipped.`;
+                console.log(`[Warn] ${warningDetail}`);
+                return {
+                    value: "",
+                    warningDetail,
+                    warningValue: requestedIterationPath,
+                };
+            }
+        } catch (error) {
+            console.log(
+                `[Warn] Could not validate qTest Iteration Path '${requestedIterationPath || "(blank)"}' ` +
+                `against Azure DevOps iterations. ${error.message}`
+            );
+        }
+
+        return {
+            value: requestedIterationPath || configuredDefault,
+            warningDetail: null,
+            warningValue: null,
+        };
+    }
+
     function formatDateOnly(value) {
         if (!value) return value;
         const date = new Date(value);
@@ -499,18 +607,10 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         const siteName = await getDefectFieldLabel(DEFECT_SITE_NAME_FIELD_ID, siteNameField);
         console.log(`[Info] Defect Site Name: ${siteName}`);
 
-        let iterationPath = await getDefectFieldLabel(DEFECT_ITERATION_PATH_FIELD_ID, iterationPathField);
-        let iterationPathWarning = null;
-        let iterationPathWarningValue = "(blank)";
-        const defaultIterationPath = normalizeText(constants.AzDoDefaultIterationPath);
+        const iterationPath = normalizeText(await getDefectFieldLabel(DEFECT_ITERATION_PATH_FIELD_ID, iterationPathField));
         console.log(`[Info] Defect Iteration Path: ${iterationPath}`);
-        if (!iterationPath && defaultIterationPath) {
-            iterationPath = defaultIterationPath;
-            iterationPathWarning =
-                `Iteration Path was blank in qTest. Defaulted ADO Iteration Path to '${defaultIterationPath}'.`;
-            console.log(`[Warn] ${iterationPathWarning}`);
-        } else if (!iterationPath) {
-            console.log(`[Info] Defect Iteration Path is blank in qTest and no default ADO Iteration Path is configured.`);
+        if (!iterationPath) {
+            console.log(`[Info] Defect Iteration Path is blank in qTest.`);
         }
 
         console.log(`[Debug] Root Cause target ADO field ref: '${adoFieldRefs.rootCause}'`);
@@ -622,9 +722,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             assignedToTeamWarning,
             assignedToTeamWarningValue,
             targetDate,
-            iterationPath,
-            iterationPathWarning,
-            iterationPathWarningValue
+            iterationPath
         };
     }
 
@@ -1031,7 +1129,8 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         qtestResolvedReason,
         qtestAssignedToIdentity,
         qtestAssignedToTeamLabel,
-        qtestTargetDate
+        qtestTargetDate,
+        qtestIterationPath
     ) {
         console.log(`[Info] Creating bug in Azure DevOps '${defectId}'`);
 
@@ -1046,7 +1145,8 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         const mappedDefectType = mapDefectType(qtestDefectType);
         const mappedAffectedRelease = mapAffectedRelease(qtestAffectedRelease);
         const finalAreaPath = normalizeAreaPathLabel(qtestAssignedToTeamLabel) || DEFAULT_AREA_PATH;
-        const finalIterationPath = normalizeText(qtestIterationPath) || normalizeText(constants.AzDoDefaultIterationPath);
+        const iterationPathResolution = await resolveAdoIterationPathForDefect(qtestIterationPath);
+        const finalIterationPath = iterationPathResolution.value;
 
         console.log(`[Info] Mapped severity: ${mappedSeverity}`);
         console.log(`[Info] Mapped Priority: ${mappedPriority}`);
@@ -1165,11 +1265,38 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
                             `Defaulted Assigned To to '${DEFAULT_ADO_ASSIGNED_TO}'.`,
                         dedupKey: `create:fallback-assigned-to:${response.data?.id ?? defectId}`,
                     },
+                    iterationPathWarning: iterationPathResolution.warningDetail
+                        ? {
+                            platform: "ADO",
+                            objectType: "Defect",
+                            objectId: response.data?.id ?? "Unknown",
+                            objectPid: defectPid,
+                            fieldName: adoFieldRefs.iterationPath,
+                            fieldValue: iterationPathResolution.warningValue,
+                            detail: iterationPathResolution.warningDetail,
+                            dedupKey: `create:iteration-path-warning:${response.data?.id ?? defectId}`,
+                        }
+                        : null,
                 };
             }
 
             console.log(`[Info] Bug created in Azure DevOps`);
-            return { bug: response.data, assignedToFallbackWarning: null };
+            return {
+                bug: response.data,
+                assignedToFallbackWarning: null,
+                iterationPathWarning: iterationPathResolution.warningDetail
+                    ? {
+                        platform: "ADO",
+                        objectType: "Defect",
+                        objectId: response.data?.id ?? "Unknown",
+                        objectPid: defectPid,
+                        fieldName: adoFieldRefs.iterationPath,
+                        fieldValue: iterationPathResolution.warningValue,
+                        detail: iterationPathResolution.warningDetail,
+                        dedupKey: `create:iteration-path-warning:${response.data?.id ?? defectId}`,
+                    }
+                    : null,
+            };
         } catch (error) {
             console.log(`[Error] Failed to create bug in Azure DevOps: ${error}`);
             if (error.response) {
@@ -1362,16 +1489,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         });
     }
 
-    if (defectDetails.iterationPathWarning && adoFieldRefs.iterationPath) {
-        emitFriendlyWarning({
-            platform: "ADO",
-            objectType: "Defect",
-            objectId: workItemId,
-            objectPid: defectDetails.pid,
-            fieldName: adoFieldRefs.iterationPath,
-            fieldValue: defectDetails.iterationPathWarningValue,
-            detail: defectDetails.iterationPathWarning,
-            dedupKey: `create:iteration-path-warning:${workItemId}`,
-        });
+    if (createResult.iterationPathWarning) {
+        emitFriendlyWarning(createResult.iterationPathWarning);
     }
 };

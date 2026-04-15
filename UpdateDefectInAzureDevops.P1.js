@@ -8,6 +8,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
   const emittedMessageKeys = new Set();
   let adoFieldRefs = null;
   const DEFECT_APPLICATION_FIELD_ID = normalizeText(constants.DefectApplicationFieldID) || "1566";
+  const DEFECT_SOURCE_TEAM_FIELD_ID = normalizeText(constants.DefectSourceTeamFieldID);
   const DEFECT_SITE_NAME_FIELD_ID = normalizeText(constants.DefectSiteNameFieldID) || "1569";
   const DEFECT_ITERATION_PATH_FIELD_ID = normalizeText(constants.DefectIterationPathFieldID) || "1603";
 
@@ -82,9 +83,9 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     return normalizeText(value).replace(/\s+/g, " ").toLowerCase();
   }
 
-  // Temporary normalization for ADO constrained values that differ only by
-  // dash style or mojibake. Keep this isolated so it is easy to remove once
-  // the customer confirms the final allowed values.
+  // Legacy helper retained only for compatibility. The active Source Team path
+  // now sends and compares the raw sanitized value directly, without any dash
+  // replacement logic.
   function normalizeAdoDashVariants(value) {
     return normalizeText(value)
       .replace(/â€“/gi, "–")
@@ -100,6 +101,10 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
   function normalizeAreaPathLabel(value) {
     return normalizeText(value);
+  }
+
+  function normalizeAdoIterationPath(value) {
+    return normalizeText(value).replace(/[\\/]+/g, "\\");
   }
 
   function extractAdoIdentityEmail(v) {
@@ -119,6 +124,118 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
       headers: { Authorization: `Basic ${encodedToken}` }
     });
     return resp.data;
+  }
+
+  async function getAdoIterationPathLookup() {
+    const cacheKey = `adoIterationPaths:${constants.AzDoProjectURL}`;
+    if (qtestMetadataCache[cacheKey]) {
+      return qtestMetadataCache[cacheKey];
+    }
+
+    const url = `${constants.AzDoProjectURL}/_apis/wit/classificationnodes/iterations?$depth=10&api-version=6.0`;
+    const encodedToken = Buffer.from(`:${constants.AZDO_TOKEN}`).toString("base64");
+    console.log("[Debug] Fetching ADO Iteration Paths:", url);
+
+    const resp = await axios.get(url, {
+      headers: { Authorization: `Basic ${encodedToken}` }
+    });
+
+    const pathLookup = new Map();
+    const visitNode = (node) => {
+      if (!node) {
+        return;
+      }
+
+      const nodePath = normalizeAdoIterationPath(node.path);
+      if (nodePath) {
+        pathLookup.set(normalizeLookupLabel(nodePath), nodePath);
+      }
+
+      if (Array.isArray(node.children)) {
+        node.children.forEach(visitNode);
+      }
+    };
+
+    visitNode(resp.data);
+    qtestMetadataCache[cacheKey] = pathLookup;
+    return pathLookup;
+  }
+
+  async function resolveOutboundIterationPath(rawIterationPathLabel, workItemId, currentDefectPid) {
+    const requestedIterationPath = normalizeAdoIterationPath(rawIterationPathLabel);
+    const configuredDefault = normalizeAdoIterationPath(constants.IterationPath || constants.AzDoDefaultIterationPath);
+
+    if (!adoFieldRefs.iterationPath) {
+      return {
+        value: requestedIterationPath || configuredDefault,
+        warningDetails: null,
+      };
+    }
+
+    try {
+      const pathLookup = await getAdoIterationPathLookup();
+      const normalizedRequested = normalizeLookupLabel(requestedIterationPath);
+      const normalizedDefault = normalizeLookupLabel(configuredDefault);
+
+      if (requestedIterationPath && pathLookup.has(normalizedRequested)) {
+        return {
+          value: pathLookup.get(normalizedRequested),
+          warningDetails: null,
+        };
+      }
+
+      if (configuredDefault) {
+        const resolvedDefault = pathLookup.get(normalizedDefault) || configuredDefault;
+        const detail = requestedIterationPath
+          ? `qTest Iteration Path '${requestedIterationPath}' was not found in Azure DevOps. Defaulted ADO Iteration Path to '${resolvedDefault}'.`
+          : `Iteration Path was blank in qTest. Defaulted ADO Iteration Path to '${resolvedDefault}'.`;
+
+        console.log(`[Warn] ${detail}`);
+        return {
+          value: resolvedDefault,
+          warningDetails: {
+            platform: "ADO",
+            objectType: "Defect",
+            objectId: workItemId,
+            objectPid: currentDefectPid,
+            fieldName: adoFieldRefs.iterationPath,
+            fieldValue: requestedIterationPath || "(blank)",
+            detail,
+            dedupKey: `update:iteration-path-warning:${workItemId}:${normalizeLookupLabel(requestedIterationPath || resolvedDefault)}`,
+          },
+        };
+      }
+
+      if (requestedIterationPath) {
+        const detail =
+          `qTest Iteration Path '${requestedIterationPath}' was not found in Azure DevOps, ` +
+          `and no default IterationPath constant is configured. Iteration Path sync was skipped.`;
+        console.log(`[Warn] ${detail}`);
+        return {
+          value: "",
+          warningDetails: {
+            platform: "ADO",
+            objectType: "Defect",
+            objectId: workItemId,
+            objectPid: currentDefectPid,
+            fieldName: adoFieldRefs.iterationPath,
+            fieldValue: requestedIterationPath,
+            detail,
+            dedupKey: `update:iteration-path-skip:${workItemId}:${normalizeLookupLabel(requestedIterationPath)}`,
+          },
+        };
+      }
+    } catch (error) {
+      console.log(
+        `[Warn] Could not validate qTest Iteration Path '${requestedIterationPath || "(blank)"}' ` +
+        `against Azure DevOps iterations. ${error.message}`
+      );
+    }
+
+    return {
+      value: requestedIterationPath || configuredDefault,
+      warningDetails: null,
+    };
   }
 
   function buildAdoFieldRefs() {
@@ -505,7 +622,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     console.log("[Info] Found Azure Work Item ID:", workItemId);
 
     const applicationProp = getPropById(DEFECT_APPLICATION_FIELD_ID);
-    const sourceTeamProp = getPropById(constants.DefectSourceTeamFieldID);
+    const sourceTeamProp = DEFECT_SOURCE_TEAM_FIELD_ID ? getPropById(DEFECT_SOURCE_TEAM_FIELD_ID) : null;
     const siteNameProp = getPropById(DEFECT_SITE_NAME_FIELD_ID);
     const severityProp = getPropById(constants.DefectSeverityFieldID);
     const priorityProp = getPropById(constants.DefectPriorityFieldID);
@@ -525,32 +642,12 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
     const adoTitle = stripWorkItemPrefix(summary);
     const appLabel = normalizeText(await getDefectFieldLabel(DEFECT_APPLICATION_FIELD_ID, applicationProp));
-    const srcLabel = normalizeText(await getDefectFieldLabel(constants.DefectSourceTeamFieldID, sourceTeamProp));
-    const srcLabelForAdo = normalizeAdoDashVariants(srcLabel);
+    const srcLabel = normalizeText(await getDefectFieldLabel(DEFECT_SOURCE_TEAM_FIELD_ID, sourceTeamProp));
     const siteLabel = normalizeText(await getDefectFieldLabel(DEFECT_SITE_NAME_FIELD_ID, siteNameProp));
     const rawIterationPathLabel = normalizeText(await getDefectFieldLabel(DEFECT_ITERATION_PATH_FIELD_ID, iterationPathProp));
-    const defaultIterationPath = normalizeText(constants.AzDoDefaultIterationPath);
-    const desiredIterationPath = rawIterationPathLabel || defaultIterationPath;
-    let iterationPathWarningDetails = null;
-    if (srcLabel && srcLabelForAdo && srcLabel !== srcLabelForAdo) {
-      console.log("[Info] Normalized SourceTeam dash variants for ADO:", {
-        from: srcLabel,
-        to: srcLabelForAdo
-      });
-    }
-    if (!rawIterationPathLabel && defaultIterationPath && adoFieldRefs.iterationPath) {
-      iterationPathWarningDetails = {
-        platform: "ADO",
-        objectType: "Defect",
-        objectId: workItemId,
-        objectPid: defectPid,
-        fieldName: adoFieldRefs.iterationPath,
-        fieldValue: "(blank)",
-        detail: `Iteration Path was blank in qTest. Defaulted ADO Iteration Path to '${defaultIterationPath}'.`,
-        dedupKey: `update:iteration-path-warning:${workItemId}`,
-      };
-      console.log(`[Warn] ${iterationPathWarningDetails.detail}`);
-    }
+    const iterationPathResolution = await resolveOutboundIterationPath(rawIterationPathLabel, workItemId, defectPid);
+    const desiredIterationPath = iterationPathResolution.value;
+    const iterationPathWarningDetails = iterationPathResolution.warningDetails;
     const assignedLabel = norm(firstNonEmpty(assignedToProp?.field_value));
     const assignedToLabel = norm(firstNonEmpty(assignedToProp?.field_value_name));
     const externalReference = norm(firstNonEmpty(externalReferenceProp?.field_value));
@@ -689,6 +786,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     console.log("[Info] Mapped Bug Stage:", mappedBugStage);
     console.log("[Info] Root Cause:", rootCauseLabel);
     console.log("[Info] Resolved Reason:", resolvedReasonLabel);
+    console.log("[Info] Source Team:", srcLabel);
     console.log("[Info] Assigned To Username:", userName);
     console.log("[Info] Assigned To Email:", userName);
     console.log("[Info] Assigned To Label:", assignedToLabel);
@@ -812,11 +910,11 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
     if (
       adoFieldRefs.sourceTeam &&
-      srcLabelForAdo &&
-      normalizeComparableConstrainedLabel(curSrc) !== normalizeComparableConstrainedLabel(srcLabelForAdo)
+      srcLabel &&
+      curSrc !== srcLabel
     ) {
-      console.log("[Info] Updating SourceTeam:", { from: curSrc || "(empty)", to: srcLabelForAdo });
-      patchData.push(buildFieldPatchOperation(adoFieldRefs.sourceTeam, srcLabelForAdo));
+      console.log("[Info] Updating SourceTeam:", { from: curSrc || "(empty)", to: srcLabel });
+      patchData.push(buildFieldPatchOperation(adoFieldRefs.sourceTeam, srcLabel));
     }
 
     if (adoFieldRefs.siteName && siteLabel && curSite !== siteLabel) {

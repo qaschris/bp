@@ -7,6 +7,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const emittedMessageKeys = new Set();
     let adoFieldRefs = null;
     const DEFECT_APPLICATION_FIELD_ID = normalizeText(constants.DefectApplicationFieldID) || "1566";
+    const DEFECT_SOURCE_TEAM_FIELD_ID = normalizeText(constants.DefectSourceTeamFieldID);
     const DEFECT_SITE_NAME_FIELD_ID = normalizeText(constants.DefectSiteNameFieldID) || "1569";
     const DEFECT_ITERATION_PATH_FIELD_ID = normalizeText(constants.DefectIterationPathFieldID) || "1603";
     const DEFECT_LINK_TO_AZURE_DEVOPS_LABEL = "Link to Azure DevOps";
@@ -235,6 +236,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             areaPath: normalizeText(constants.AzDoAreaPathFieldRef),
             assignedTo: normalizeText(constants.AzDoAssignedToFieldRef),
             application: normalizeText(constants.AzDoApplicationFieldRef),
+            sourceTeam: normalizeText(constants.AzDoSourceTeamFieldRef),
             siteName: normalizeText(constants.AzDoSiteNameFieldRef),
             bugStage: normalizeText(constants.AzDoBugStageFieldRef),
             iterationPath: normalizeText(constants.AzDoIterationPathFieldRef),
@@ -670,6 +672,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         linkFieldId,
         linkValue,
         applicationValue,
+        sourceTeamValue,
         siteNameValue,
         affectedReleaseValue,
         iterationPathValue,
@@ -720,6 +723,16 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
                 field_id: Number.isNaN(parsedApplicationFieldId) ? DEFECT_APPLICATION_FIELD_ID : parsedApplicationFieldId,
                 field_value: Number.isNaN(parsedApplicationValue) ? applicationValue : parsedApplicationValue,
             });
+        }
+
+        if (DEFECT_SOURCE_TEAM_FIELD_ID && sourceTeamValue !== null && sourceTeamValue !== undefined && sourceTeamValue !== "") {
+            const parsedSourceTeamValue = parseInt(sourceTeamValue, 10);
+            const parsedSourceTeamFieldId = parseInt(DEFECT_SOURCE_TEAM_FIELD_ID, 10);
+            requestBody.properties.push({
+                field_id: Number.isNaN(parsedSourceTeamFieldId) ? DEFECT_SOURCE_TEAM_FIELD_ID : parsedSourceTeamFieldId,
+                field_value: Number.isNaN(parsedSourceTeamValue) ? sourceTeamValue : parsedSourceTeamValue,
+            });
+            console.log(`[Info] Added Source Team '${sourceTeamValue}' to qTest update payload.`);
         }
 
         if (siteNameValue !== null && siteNameValue !== undefined && siteNameValue !== "") {
@@ -1251,6 +1264,29 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         console.log(`[Warn] ADO Application '${adoApplication}' could not be mapped to qTest. Application update will be skipped.`);
     }
 
+    const adoSourceTeam = adoFieldRefs.sourceTeam
+        ? getAdoFieldValue(fields, adoFieldRefs.sourceTeam, { preferFormatted: true })
+        : "";
+    console.log(`[Info] ADO Source Team value: '${adoSourceTeam}'`);
+
+    let qtestSourceTeamResult = { value: null, warningDetails: null };
+    if (DEFECT_SOURCE_TEAM_FIELD_ID) {
+        qtestSourceTeamResult = await resolveOptionalDefectFieldValue(
+            DEFECT_SOURCE_TEAM_FIELD_ID,
+            adoSourceTeam,
+            "Source Team",
+            defectContext
+        );
+    } else if (adoSourceTeam) {
+        console.log(`[Warn] DefectSourceTeamFieldID is not configured in Pulse. Source Team update will be skipped.`);
+    }
+    const qtestSourceTeamValue = qtestSourceTeamResult.value;
+    if (qtestSourceTeamValue) {
+        console.log(`[Info] Mapped ADO Source Team '${adoSourceTeam}' to qTest Source Team value '${qtestSourceTeamValue}'`);
+    } else if (adoSourceTeam) {
+        console.log(`[Warn] ADO Source Team '${adoSourceTeam}' could not be mapped to qTest. Source Team update will be skipped.`);
+    }
+
     const adoSiteName = adoFieldRefs.siteName
         ? getAdoFieldValue(fields, adoFieldRefs.siteName, { preferFormatted: true })
         : "";
@@ -1280,11 +1316,42 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         "Iteration Path",
         defectContext
     );
-    const qtestIterationPathValue = qtestIterationPathResult.value;
+    let qtestIterationPathValue = qtestIterationPathResult.value;
+    let iterationPathWarningDetails = qtestIterationPathResult.warningDetails;
     if (qtestIterationPathValue) {
         console.log(`[Info] Mapped ADO Iteration Path '${adoIterationPath}' to qTest Iteration Path value '${qtestIterationPathValue}'`);
     } else if (adoIterationPath) {
-        console.log(`[Warn] ADO Iteration Path '${adoIterationPath}' could not be mapped to qTest. Iteration Path update will be skipped.`);
+        const defaultIterationPath = normalizeText(constants.IterationPath);
+        if (defaultIterationPath) {
+            const defaultIterationPathResult = await resolveOptionalDefectFieldValue(
+                DEFECT_ITERATION_PATH_FIELD_ID,
+                defaultIterationPath,
+                "Iteration Path",
+                defectContext
+            );
+
+            if (defaultIterationPathResult.value) {
+                qtestIterationPathValue = defaultIterationPathResult.value;
+                iterationPathWarningDetails = {
+                    platform: "qTest",
+                    objectType: "Defect",
+                    objectId: defectContext?.id ?? workItemId,
+                    objectPid: defectContext?.pid,
+                    fieldName: "Iteration Path",
+                    fieldValue: adoIterationPath,
+                    detail: `ADO Iteration Path '${adoIterationPath}' could not be mapped to qTest. Defaulted qTest Iteration Path to '${defaultIterationPath}'.`,
+                    dedupKey: `warning:iteration-path-default:${defectContext?.id ?? workItemId}:${normalizeLabel(adoIterationPath)}`,
+                };
+                console.log(`[Warn] ${iterationPathWarningDetails.detail}`);
+            } else {
+                console.log(
+                    `[Warn] ADO Iteration Path '${adoIterationPath}' could not be mapped to qTest, ` +
+                    `and fallback IterationPath '${defaultIterationPath}' was not valid in qTest.`
+                );
+            }
+        } else {
+            console.log(`[Warn] ADO Iteration Path '${adoIterationPath}' could not be mapped to qTest. Iteration Path update will be skipped.`);
+        }
     }
 
     if (defectToUpdate) {
@@ -1295,6 +1362,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             qtestLinkFieldId,
             adoLinkValue,
             qtestApplicationValue,
+            qtestSourceTeamValue,
             qtestSiteNameValue,
             qtestAffectedReleaseValue,
             qtestIterationPathValue,
@@ -1343,12 +1411,16 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
                 emitFriendlyWarning(qtestApplicationResult.warningDetails);
             }
 
+            if (qtestSourceTeamResult.warningDetails) {
+                emitFriendlyWarning(qtestSourceTeamResult.warningDetails);
+            }
+
             if (qtestSiteNameResult.warningDetails) {
                 emitFriendlyWarning(qtestSiteNameResult.warningDetails);
             }
 
-            if (qtestIterationPathResult.warningDetails) {
-                emitFriendlyWarning(qtestIterationPathResult.warningDetails);
+            if (iterationPathWarningDetails) {
+                emitFriendlyWarning(iterationPathWarningDetails);
             }
         }
     }
