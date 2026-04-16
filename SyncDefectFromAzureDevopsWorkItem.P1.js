@@ -60,6 +60,25 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         }
     }
 
+    function formatQtestUtcDateTime(value) {
+        if (!value) {
+            return "";
+        }
+
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) {
+            return normalizeText(value);
+        }
+
+        const year = date.getUTCFullYear();
+        const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+        const day = String(date.getUTCDate()).padStart(2, "0");
+        const hours = String(date.getUTCHours()).padStart(2, "0");
+        const minutes = String(date.getUTCMinutes()).padStart(2, "0");
+        const seconds = String(date.getUTCSeconds()).padStart(2, "0");
+        return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}+00:00`;
+    }
+
     function getAllowedValues(fieldDefinition, options = {}) {
         const includeInactive = options.includeInactive === true;
         return Array.isArray(fieldDefinition?.allowed_values)
@@ -822,12 +841,17 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             console.log(`[Info] Added External Reference to qTest update payload.`);
         }
 
-        if (constants.DefectClosedDateFieldID && closedDateValue) {
+        if (constants.DefectClosedDateFieldID && closedDateValue !== null && closedDateValue !== undefined && closedDateValue !== "") {
+            const parsedClosedDateFieldId = parseInt(constants.DefectClosedDateFieldID, 10);
             requestBody.properties.push({
-                field_id: constants.DefectClosedDateFieldID,
+                field_id: Number.isNaN(parsedClosedDateFieldId)
+                    ? constants.DefectClosedDateFieldID
+                    : parsedClosedDateFieldId,
                 field_value: closedDateValue,
             });
             console.log(`[Info] Added Closed Date '${closedDateValue}' to qTest update payload.`);
+        } else {
+            console.log(`[Info] No Closed Date provided for qTest update payload.`);
         }
 
         if (constants.DefectResolvedReasonFieldID && resolvedReasonValue) {
@@ -1195,7 +1219,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     console.log(`[Info] ADO External Reference value: '${adoExternalReference}'`);
 
     if (adoActualCloseDate) {
-        qtestClosedDateValue = new Date(adoActualCloseDate).toISOString().replace(".000Z", "+00:00");
+        qtestClosedDateValue = formatQtestUtcDateTime(adoActualCloseDate);
         console.log(`[Info] ADO Actual Close Date: '${adoActualCloseDate}' => qTest Closed Date: '${qtestClosedDateValue}'`);
     } else {
         console.log(`[Info] No Actual Close Date found in ADO.`);

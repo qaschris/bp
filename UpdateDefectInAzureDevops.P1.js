@@ -496,6 +496,28 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
       return isNaN(date.getTime()) ? "" : date.toISOString().slice(0, 10);
     }
 
+    function formatUtcDateTime(value) {
+      if (!value) return "";
+      const date = new Date(value);
+      if (isNaN(date.getTime())) {
+        return normalizeText(value);
+      }
+
+      const year = date.getUTCFullYear();
+      const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+      const day = String(date.getUTCDate()).padStart(2, "0");
+      const hours = String(date.getUTCHours()).padStart(2, "0");
+      const minutes = String(date.getUTCMinutes()).padStart(2, "0");
+      const seconds = String(date.getUTCSeconds()).padStart(2, "0");
+      return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}Z`;
+    }
+
+    function normalizeUtcDateTime(value) {
+      if (!value) return "";
+      const date = new Date(value);
+      return isNaN(date.getTime()) ? "" : formatUtcDateTime(date);
+    }
+
     async function getDefectFieldLabel(fieldId, prop) {
       if (!prop) {
         return "";
@@ -873,7 +895,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const curBugStage = norm(getAdoFieldValue(cur, adoFieldRefs.bugStage));
     const curRootCause = norm(getAdoFieldValue(cur, adoFieldRefs.rootCause, { preferFormatted: true }));
     const curProposedFix = htmlToPlainText(getAdoFieldValue(cur, adoFieldRefs.proposedFix));
-    const curClosedDate = normalizeDateOnly(getAdoFieldValue(cur, adoFieldRefs.closedDate));
+    const curClosedDate = normalizeUtcDateTime(getAdoFieldValue(cur, adoFieldRefs.closedDate));
     const curResolvedReason = norm(getAdoFieldValue(cur, adoFieldRefs.resolvedReason, { preferFormatted: true }));
     const curApp = norm(getAdoFieldValue(cur, adoFieldRefs.application));
     const curSrc = norm(getAdoFieldValue(cur, adoFieldRefs.sourceTeam));
@@ -889,7 +911,8 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const desiredProposedFix = proposedFix || "";
     const desiredProposedFixPlain = htmlToPlainText(desiredProposedFix);
     const desiredTargetDate = formatDateOnly(targetDate);
-    const desiredClosedDate = formatDateOnly(closedDate);
+    const desiredClosedDate = formatUtcDateTime(closedDate);
+    const shouldSyncClosedDate = ["Closed", "Rejected", "Resolved"].includes(mappedStatus);
 
     console.log("curTargetDate", curTargetDate);
     console.log("newTargetDate", desiredTargetDate, isoDate);
@@ -946,9 +969,11 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
       patchData.push(buildFieldPatchOperation(adoFieldRefs.proposedFix, desiredProposedFix));
     }
 
-    if (desiredClosedDate && curClosedDate !== normalizeDateOnly(desiredClosedDate)) {
+    if (shouldSyncClosedDate && desiredClosedDate && curClosedDate !== normalizeUtcDateTime(desiredClosedDate)) {
       console.log("[Info] Updating Closed Date:", { from: curClosedDate || "(empty)", to: desiredClosedDate });
       patchData.push(buildFieldPatchOperation(adoFieldRefs.closedDate, desiredClosedDate));
+    } else if (desiredClosedDate && !shouldSyncClosedDate) {
+      console.log(`[Info] Skipping Closed Date sync because outbound ADO State is '${mappedStatus || "(blank)"}'.`);
     }
 
     if (resolvedReasonLabel && mappedStatus !== "New" && curResolvedReason !== resolvedReasonLabel) {
