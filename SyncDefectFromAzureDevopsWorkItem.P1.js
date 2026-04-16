@@ -801,8 +801,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
                 field_value: parseInt(statusValue, 10),
             });
             console.log(`[Info] Added Status '${statusValue}' to qTest update payload.`);
-        } else if (["active", "cancelled"].includes(normalizeLabel(adoState))) {
-            console.log(`[Info] Intentionally skipped qTest Status update for ADO State '${adoState}' pending business confirmation.`);
         } else {
             console.log(`[Warn] No Status mapping found or ADO state '${adoState}' not mapped.`);
         }
@@ -994,11 +992,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         : null;
     const adoState = getAdoFieldValue(fields, adoFieldRefs.state);
     console.log(`[Info] ADO State value: '${adoState}'`);
-
-    if (["active", "cancelled"].includes(normalizeLabel(adoState))) {
-        console.log(`[Info] Skipping ADO -> qTest defect sync for ADO State '${adoState}' per current business rule.`);
-        return;
-    }
 
     const adoLinkValue = normalizeText(event?.resource?._links?.html?.href);
     const qtestLinkFieldId = normalizeText(constants.DefectLinkToAzureDevOpsFieldID)

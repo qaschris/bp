@@ -312,20 +312,34 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         }
     }
 
-    function normalizeAdoIterationPath(value) {
-        return normalizeText(value).replace(/[\\/]+/g, "\\");
+    function normalizeAdoClassificationPath(value) {
+        return normalizeText(value)
+            .replace(/[\\/]+/g, "\\")
+            .replace(/^\\+/, "");
     }
 
-    async function getAdoIterationPathLookup() {
-        const cacheKey = `adoIterationPaths:${constants.AzDoProjectURL}`;
+    function stripEmbeddedAdoLinkText(value) {
+        if (!value) {
+            return "";
+        }
+
+        return String(value)
+            .replace(/(?:Link to Azure DevOps:\s*https?:\/\/\S+\s*Repro steps:\s*)+/gi, "")
+            .replace(/(?:Link to Azure DevOps:\s*https?:\/\/\S+\s*)+/gi, "")
+            .replace(/^(?:Repro steps:\s*)+/i, "")
+            .trim();
+    }
+
+    async function getAdoClassificationPathLookup(classificationType) {
+        const cacheKey = `adoClassificationPaths:${classificationType}:${constants.AzDoProjectURL}`;
         if (qtestMetadataCache[cacheKey]) {
             return qtestMetadataCache[cacheKey];
         }
 
         const baseUrl = encodeIfNeeded(constants.AzDoProjectURL);
-        const url = `${baseUrl}/_apis/wit/classificationnodes/iterations?$depth=10&api-version=6.0`;
+        const url = `${baseUrl}/_apis/wit/classificationnodes/${classificationType}?$depth=10&api-version=6.0`;
         const encodedToken = Buffer.from(`:${constants.AZDO_TOKEN}`).toString("base64");
-        console.log(`[Debug] Fetching ADO Iteration Paths from '${url}'.`);
+        console.log(`[Debug] Fetching ADO ${classificationType} paths from '${url}'.`);
 
         const response = await axios.get(url, {
             headers: {
@@ -334,18 +348,21 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         });
 
         const pathLookup = new Map();
-        const visitNode = (node) => {
+        const visitNode = (node, parentPath = "") => {
             if (!node) {
                 return;
             }
 
-            const nodePath = normalizeAdoIterationPath(node.path);
+            const fallbackPath = [parentPath, normalizeText(node.name)]
+                .filter(Boolean)
+                .join("\\");
+            const nodePath = normalizeAdoClassificationPath(node.path || fallbackPath);
             if (nodePath) {
                 pathLookup.set(normalizeLookupLabel(nodePath), nodePath);
             }
 
             if (Array.isArray(node.children)) {
-                node.children.forEach(visitNode);
+                node.children.forEach(child => visitNode(child, nodePath));
             }
         };
 
@@ -354,26 +371,34 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         return pathLookup;
     }
 
-    async function resolveAdoIterationPathForDefect(rawIterationPath) {
-        const requestedIterationPath = normalizeAdoIterationPath(rawIterationPath);
-        const configuredDefault = normalizeAdoIterationPath(
-            constants.IterationPath || constants.AzDoDefaultIterationPath
-        );
+    async function resolveAdoClassificationPathForDefect({
+        rawPath,
+        classificationType,
+        fallbackPath,
+        fieldLabel,
+        rawFieldLabel = fieldLabel,
+    }) {
+        const requestedPath = normalizeAdoClassificationPath(rawPath);
+        const configuredDefault = normalizeAdoClassificationPath(fallbackPath);
 
-        if (!adoFieldRefs.iterationPath) {
+        const targetFieldRef = classificationType === "iterations"
+            ? adoFieldRefs.iterationPath
+            : adoFieldRefs.areaPath;
+
+        if (!targetFieldRef) {
             return {
-                value: requestedIterationPath || configuredDefault,
+                value: requestedPath || configuredDefault,
                 warningDetail: null,
                 warningValue: null,
             };
         }
 
         try {
-            const pathLookup = await getAdoIterationPathLookup();
-            const normalizedRequested = normalizeLookupLabel(requestedIterationPath);
+            const pathLookup = await getAdoClassificationPathLookup(classificationType);
+            const normalizedRequested = normalizeLookupLabel(requestedPath);
             const normalizedDefault = normalizeLookupLabel(configuredDefault);
 
-            if (requestedIterationPath && pathLookup.has(normalizedRequested)) {
+            if (requestedPath && pathLookup.has(normalizedRequested)) {
                 return {
                     value: pathLookup.get(normalizedRequested),
                     warningDetail: null,
@@ -383,41 +408,60 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
             if (configuredDefault) {
                 const resolvedDefault = pathLookup.get(normalizedDefault) || configuredDefault;
-                const warningDetail = requestedIterationPath
-                    ? `qTest Iteration Path '${requestedIterationPath}' was not found in Azure DevOps. Defaulted ADO Iteration Path to '${resolvedDefault}'.`
-                    : `Iteration Path was blank in qTest. Defaulted ADO Iteration Path to '${resolvedDefault}'.`;
+                const warningDetail = requestedPath
+                    ? `${rawFieldLabel} '${requestedPath}' was not found in Azure DevOps. Defaulted ADO ${fieldLabel} to '${resolvedDefault}'.`
+                    : `${fieldLabel} was blank in qTest. Defaulted ADO ${fieldLabel} to '${resolvedDefault}'.`;
 
                 console.log(`[Warn] ${warningDetail}`);
                 return {
                     value: resolvedDefault,
                     warningDetail,
-                    warningValue: requestedIterationPath || "(blank)",
+                    warningValue: requestedPath || "(blank)",
                 };
             }
 
-            if (requestedIterationPath) {
+            if (requestedPath) {
                 const warningDetail =
-                    `qTest Iteration Path '${requestedIterationPath}' was not found in Azure DevOps, ` +
-                    `and no default IterationPath constant is configured. Iteration Path sync was skipped.`;
+                    `${rawFieldLabel} '${requestedPath}' was not found in Azure DevOps, ` +
+                    `and no default ${fieldLabel} constant is configured. ${fieldLabel} sync was skipped.`;
                 console.log(`[Warn] ${warningDetail}`);
                 return {
                     value: "",
                     warningDetail,
-                    warningValue: requestedIterationPath,
+                    warningValue: requestedPath,
                 };
             }
         } catch (error) {
             console.log(
-                `[Warn] Could not validate qTest Iteration Path '${requestedIterationPath || "(blank)"}' ` +
-                `against Azure DevOps iterations. ${error.message}`
+                `[Warn] Could not validate qTest ${fieldLabel} '${requestedPath || "(blank)"}' ` +
+                `against Azure DevOps ${classificationType}. ${error.message}`
             );
         }
 
         return {
-            value: requestedIterationPath || configuredDefault,
+            value: requestedPath || configuredDefault,
             warningDetail: null,
             warningValue: null,
         };
+    }
+
+    async function resolveAdoIterationPathForDefect(rawIterationPath) {
+        return resolveAdoClassificationPathForDefect({
+            rawPath: rawIterationPath,
+            classificationType: "iterations",
+            fallbackPath: constants.IterationPath || constants.AzDoDefaultIterationPath,
+            fieldLabel: "Iteration Path",
+        });
+    }
+
+    async function resolveAdoAreaPathForDefect(rawAreaPath) {
+        return resolveAdoClassificationPathForDefect({
+            rawPath: rawAreaPath,
+            classificationType: "areas",
+            fallbackPath: DEFAULT_AREA_PATH,
+            fieldLabel: "AreaPath",
+            rawFieldLabel: "ADO AreaPath",
+        });
     }
 
     function formatDateOnly(value) {
@@ -1144,7 +1188,9 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         const mappedPriority = mapPriority(qtestPriority);
         const mappedDefectType = mapDefectType(qtestDefectType);
         const mappedAffectedRelease = mapAffectedRelease(qtestAffectedRelease);
-        const finalAreaPath = normalizeAreaPathLabel(qtestAssignedToTeamLabel) || DEFAULT_AREA_PATH;
+        const sanitizedDescription = stripEmbeddedAdoLinkText(description);
+        const areaPathResolution = await resolveAdoAreaPathForDefect(qtestAssignedToTeamLabel);
+        const finalAreaPath = areaPathResolution.value || DEFAULT_AREA_PATH;
         const iterationPathResolution = await resolveAdoIterationPathForDefect(qtestIterationPath);
         const finalIterationPath = iterationPathResolution.value;
 
@@ -1166,7 +1212,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
         const requestBody = [
             buildFieldPatchOperation(adoFieldRefs.title, name),
-            buildFieldPatchOperation(adoFieldRefs.reproSteps, description),
+            buildFieldPatchOperation(adoFieldRefs.reproSteps, sanitizedDescription),
             buildFieldPatchOperation(adoFieldRefs.tags, buildAdoTags(defectPid)),
             buildFieldPatchOperation(adoFieldRefs.state, mappedStatus),
             buildFieldPatchOperation(adoFieldRefs.severity, mappedSeverity),
@@ -1277,6 +1323,18 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
                             dedupKey: `create:iteration-path-warning:${response.data?.id ?? defectId}`,
                         }
                         : null,
+                    areaPathWarning: areaPathResolution.warningDetail
+                        ? {
+                            platform: "ADO",
+                            objectType: "Defect",
+                            objectId: response.data?.id ?? "Unknown",
+                            objectPid: defectPid,
+                            fieldName: adoFieldRefs.areaPath,
+                            fieldValue: areaPathResolution.warningValue,
+                            detail: areaPathResolution.warningDetail,
+                            dedupKey: `create:area-path-validation-warning:${response.data?.id ?? defectId}`,
+                        }
+                        : null,
                 };
             }
 
@@ -1294,6 +1352,18 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
                         fieldValue: iterationPathResolution.warningValue,
                         detail: iterationPathResolution.warningDetail,
                         dedupKey: `create:iteration-path-warning:${response.data?.id ?? defectId}`,
+                    }
+                    : null,
+                areaPathWarning: areaPathResolution.warningDetail
+                    ? {
+                        platform: "ADO",
+                        objectType: "Defect",
+                        objectId: response.data?.id ?? "Unknown",
+                        objectPid: defectPid,
+                        fieldName: adoFieldRefs.areaPath,
+                        fieldValue: areaPathResolution.warningValue,
+                        detail: areaPathResolution.warningDetail,
+                        dedupKey: `create:area-path-validation-warning:${response.data?.id ?? defectId}`,
                     }
                     : null,
             };
@@ -1474,6 +1544,10 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
     if (createResult.assignedToFallbackWarning) {
         emitFriendlyWarning(createResult.assignedToFallbackWarning);
+    }
+
+    if (createResult.areaPathWarning) {
+        emitFriendlyWarning(createResult.areaPathWarning);
     }
 
     if (defectDetails.assignedToTeamWarning) {
