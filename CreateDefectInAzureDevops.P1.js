@@ -315,7 +315,38 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     function normalizeAdoClassificationPath(value) {
         return normalizeText(value)
             .replace(/[\\/]+/g, "\\")
-            .replace(/^\\+/, "");
+            .replace(/^\\+/, "")
+            .replace(/\s+/g, " ")
+            .trim();
+    }
+
+    function getClassificationStructuralSegmentNames(classificationType) {
+        return classificationType === "areas"
+            ? new Set(["area", "areas"])
+            : new Set(["iteration", "iterations"]);
+    }
+
+    function buildAdoClassificationPathAliases(value, classificationType) {
+        const normalizedPath = normalizeAdoClassificationPath(value);
+        if (!normalizedPath) {
+            return [];
+        }
+
+        const segments = normalizedPath.split("\\").filter(Boolean);
+        const aliases = new Set();
+        const structuralNames = getClassificationStructuralSegmentNames(classificationType);
+
+        aliases.add(segments.join("\\"));
+
+        if (segments.length > 1 && structuralNames.has(segments[1].toLowerCase())) {
+            aliases.add([segments[0], ...segments.slice(2)].join("\\"));
+        }
+
+        if (segments.length > 1) {
+            aliases.add(segments.slice(1).join("\\"));
+        }
+
+        return [...aliases].filter(Boolean);
     }
 
     function stripEmbeddedAdoLinkText(value) {
@@ -356,13 +387,21 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             const fallbackPath = [parentPath, normalizeText(node.name)]
                 .filter(Boolean)
                 .join("\\");
-            const nodePath = normalizeAdoClassificationPath(node.path || fallbackPath);
-            if (nodePath) {
-                pathLookup.set(normalizeLookupLabel(nodePath), nodePath);
+            const primaryPath = normalizeAdoClassificationPath(node.path || fallbackPath);
+            const candidatePaths = [node.path, fallbackPath];
+
+            for (const candidatePath of candidatePaths) {
+                const aliases = buildAdoClassificationPathAliases(candidatePath, classificationType);
+                for (const alias of aliases) {
+                    const normalizedAlias = normalizeLookupLabel(alias);
+                    if (!pathLookup.has(normalizedAlias)) {
+                        pathLookup.set(normalizedAlias, primaryPath || alias);
+                    }
+                }
             }
 
             if (Array.isArray(node.children)) {
-                node.children.forEach(child => visitNode(child, nodePath));
+                node.children.forEach(child => visitNode(child, primaryPath || fallbackPath));
             }
         };
 
@@ -395,23 +434,38 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
         try {
             const pathLookup = await getAdoClassificationPathLookup(classificationType);
-            const normalizedRequested = normalizeLookupLabel(requestedPath);
-            const normalizedDefault = normalizeLookupLabel(configuredDefault);
+            const requestedAliases = buildAdoClassificationPathAliases(requestedPath, classificationType);
+            const defaultAliases = buildAdoClassificationPathAliases(configuredDefault, classificationType);
 
-            if (requestedPath && pathLookup.has(normalizedRequested)) {
-                return {
-                    value: pathLookup.get(normalizedRequested),
-                    warningDetail: null,
-                    warningValue: null,
-                };
+            for (const requestedAlias of requestedAliases) {
+                const normalizedRequested = normalizeLookupLabel(requestedAlias);
+                if (pathLookup.has(normalizedRequested)) {
+                    return {
+                        value: pathLookup.get(normalizedRequested),
+                        warningDetail: null,
+                        warningValue: null,
+                    };
+                }
             }
 
             if (configuredDefault) {
-                const resolvedDefault = pathLookup.get(normalizedDefault) || configuredDefault;
+                let resolvedDefault = configuredDefault;
+                for (const defaultAlias of defaultAliases) {
+                    const normalizedDefault = normalizeLookupLabel(defaultAlias);
+                    if (pathLookup.has(normalizedDefault)) {
+                        resolvedDefault = pathLookup.get(normalizedDefault);
+                        break;
+                    }
+                }
                 const warningDetail = requestedPath
                     ? `${rawFieldLabel} '${requestedPath}' was not found in Azure DevOps. Defaulted ADO ${fieldLabel} to '${resolvedDefault}'.`
                     : `${fieldLabel} was blank in qTest. Defaulted ADO ${fieldLabel} to '${resolvedDefault}'.`;
 
+                if (requestedPath) {
+                    console.log(
+                        `[Debug] Requested ${classificationType} aliases: ${requestedAliases.join(" | ") || "(none)"}.`
+                    );
+                }
                 console.log(`[Warn] ${warningDetail}`);
                 return {
                     value: resolvedDefault,

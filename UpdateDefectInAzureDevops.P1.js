@@ -104,7 +104,40 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
   }
 
   function normalizeAdoIterationPath(value) {
-    return normalizeText(value).replace(/[\\/]+/g, "\\");
+    return normalizeText(value)
+      .replace(/[\\/]+/g, "\\")
+      .replace(/^\\+/, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function getClassificationStructuralSegmentNames(classificationType) {
+    return classificationType === "areas"
+      ? new Set(["area", "areas"])
+      : new Set(["iteration", "iterations"]);
+  }
+
+  function buildAdoClassificationPathAliases(value, classificationType) {
+    const normalizedPath = normalizeAdoIterationPath(value);
+    if (!normalizedPath) {
+      return [];
+    }
+
+    const segments = normalizedPath.split("\\").filter(Boolean);
+    const aliases = new Set();
+    const structuralNames = getClassificationStructuralSegmentNames(classificationType);
+
+    aliases.add(segments.join("\\"));
+
+    if (segments.length > 1 && structuralNames.has(segments[1].toLowerCase())) {
+      aliases.add([segments[0], ...segments.slice(2)].join("\\"));
+    }
+
+    if (segments.length > 1) {
+      aliases.add(segments.slice(1).join("\\"));
+    }
+
+    return [...aliases].filter(Boolean);
   }
 
   function extractAdoIdentityEmail(v) {
@@ -161,13 +194,21 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
       const fallbackPath = [parentPath, normalizeText(node.name)]
         .filter(Boolean)
         .join("\\");
-      const nodePath = normalizeAdoIterationPath(node.path || fallbackPath).replace(/^\\+/, "");
-      if (nodePath) {
-        pathLookup.set(normalizeLookupLabel(nodePath), nodePath);
+      const primaryPath = normalizeAdoIterationPath(node.path || fallbackPath);
+      const candidatePaths = [node.path, fallbackPath];
+
+      for (const candidatePath of candidatePaths) {
+        const aliases = buildAdoClassificationPathAliases(candidatePath, classificationType);
+        for (const alias of aliases) {
+          const normalizedAlias = normalizeLookupLabel(alias);
+          if (!pathLookup.has(normalizedAlias)) {
+            pathLookup.set(normalizedAlias, primaryPath || alias);
+          }
+        }
       }
 
       if (Array.isArray(node.children)) {
-        node.children.forEach(child => visitNode(child, nodePath));
+        node.children.forEach(child => visitNode(child, primaryPath || fallbackPath));
       }
     };
 
@@ -178,6 +219,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
   async function resolveOutboundAdoClassificationPath({
     rawPath,
+    currentAdoPath,
     classificationType,
     fallbackPath,
     fieldLabel,
@@ -185,8 +227,9 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     workItemId,
     currentDefectPid
   }) {
-    const requestedPath = normalizeAdoIterationPath(rawPath).replace(/^\\+/, "");
-    const configuredDefault = normalizeAdoIterationPath(fallbackPath).replace(/^\\+/, "");
+    const requestedPath = normalizeAdoIterationPath(rawPath);
+    const currentPath = normalizeAdoIterationPath(currentAdoPath);
+    const configuredDefault = normalizeAdoIterationPath(fallbackPath);
     const targetFieldRef = classificationType === "iterations"
       ? adoFieldRefs.iterationPath
       : adoFieldRefs.areaPath;
@@ -200,22 +243,54 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
     try {
       const pathLookup = await getAdoClassificationPathLookup(classificationType);
-      const normalizedRequested = normalizeLookupLabel(requestedPath);
-      const normalizedDefault = normalizeLookupLabel(configuredDefault);
+      const requestedAliases = buildAdoClassificationPathAliases(requestedPath, classificationType);
+      const currentAliases = buildAdoClassificationPathAliases(currentPath, classificationType);
+      const defaultAliases = buildAdoClassificationPathAliases(configuredDefault, classificationType);
 
-      if (requestedPath && pathLookup.has(normalizedRequested)) {
-        return {
-          value: pathLookup.get(normalizedRequested),
-          warningDetails: null,
-        };
+      for (const requestedAlias of requestedAliases) {
+        const normalizedRequested = normalizeLookupLabel(requestedAlias);
+        if (pathLookup.has(normalizedRequested)) {
+          return {
+            value: pathLookup.get(normalizedRequested),
+            warningDetails: null,
+          };
+        }
+      }
+
+      if (requestedAliases.length && currentAliases.length) {
+        const currentAliasSet = new Set(currentAliases.map(alias => normalizeLookupLabel(alias)));
+        const matchesCurrentValue = requestedAliases.some(alias => currentAliasSet.has(normalizeLookupLabel(alias)));
+        if (matchesCurrentValue) {
+          console.log(
+            `[Info] qTest ${fieldLabel} '${requestedPath}' was not recognized in the Azure DevOps ${classificationType} lookup, ` +
+            `but it already matches the current ADO value '${currentPath}'. Leaving it unchanged.`
+          );
+          return {
+            value: currentPath,
+            warningDetails: null,
+          };
+        }
       }
 
       if (configuredDefault) {
-        const resolvedDefault = pathLookup.get(normalizedDefault) || configuredDefault;
+        let resolvedDefault = configuredDefault;
+        for (const defaultAlias of defaultAliases) {
+          const normalizedDefault = normalizeLookupLabel(defaultAlias);
+          if (pathLookup.has(normalizedDefault)) {
+            resolvedDefault = pathLookup.get(normalizedDefault);
+            break;
+          }
+        }
         const detail = requestedPath
           ? `${rawFieldLabel} '${requestedPath}' was not found in Azure DevOps. Defaulted ADO ${fieldLabel} to '${resolvedDefault}'.`
           : `${fieldLabel} was blank in qTest. Defaulted ADO ${fieldLabel} to '${resolvedDefault}'.`;
 
+        if (requestedPath) {
+          console.log(`[Debug] Requested ${classificationType} aliases: ${requestedAliases.join(" | ") || "(none)"}`);
+          if (currentPath) {
+            console.log(`[Debug] Current ADO ${fieldLabel} aliases: ${currentAliases.join(" | ") || "(none)"}`);
+          }
+        }
         console.log(`[Warn] ${detail}`);
         return {
           value: resolvedDefault,
@@ -264,9 +339,10 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     };
   }
 
-  async function resolveOutboundIterationPath(rawIterationPathLabel, workItemId, currentDefectPid) {
+  async function resolveOutboundIterationPath(rawIterationPathLabel, workItemId, currentDefectPid, currentAdoPath = "") {
     return resolveOutboundAdoClassificationPath({
       rawPath: rawIterationPathLabel,
+      currentAdoPath,
       classificationType: "iterations",
       fallbackPath: constants.IterationPath || constants.AzDoDefaultIterationPath,
       fieldLabel: "Iteration Path",
@@ -275,9 +351,10 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     });
   }
 
-  async function resolveOutboundAreaPath(rawAreaPath, workItemId, currentDefectPid) {
+  async function resolveOutboundAreaPath(rawAreaPath, workItemId, currentDefectPid, currentAdoPath = "") {
     return resolveOutboundAdoClassificationPath({
       rawPath: rawAreaPath,
+      currentAdoPath,
       classificationType: "areas",
       fallbackPath: constants.AreaPath,
       fieldLabel: "AreaPath",
@@ -692,6 +769,24 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const workItemId = wiMatch[1];
     console.log("[Info] Found Azure Work Item ID:", workItemId);
 
+    let adoCurrent;
+    try {
+      adoCurrent = await getAdoWorkItem(workItemId, constants.AZDO_TOKEN, constants.AzDoProjectURL);
+    } catch (e) {
+      console.error("[Error] Failed to read ADO work item:", e.response?.data || e.message);
+      emitFriendlyFailure({
+        platform: "ADO",
+        objectType: "Defect",
+        objectId: workItemId,
+        detail: "Unable to read the Azure DevOps work item."
+      });
+      return;
+    }
+
+    const cur = adoCurrent?.fields || {};
+    const curAreaPath = norm(getAdoFieldValue(cur, adoFieldRefs.areaPath));
+    const curIterationPath = norm(getAdoFieldValue(cur, adoFieldRefs.iterationPath));
+
     const applicationProp = getPropById(DEFECT_APPLICATION_FIELD_ID);
     const sourceTeamProp = DEFECT_SOURCE_TEAM_FIELD_ID ? getPropById(DEFECT_SOURCE_TEAM_FIELD_ID) : null;
     const siteNameProp = getPropById(DEFECT_SITE_NAME_FIELD_ID);
@@ -716,7 +811,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const srcLabel = normalizeText(await getDefectFieldLabel(DEFECT_SOURCE_TEAM_FIELD_ID, sourceTeamProp));
     const siteLabel = normalizeText(await getDefectFieldLabel(DEFECT_SITE_NAME_FIELD_ID, siteNameProp));
     const rawIterationPathLabel = normalizeText(await getDefectFieldLabel(DEFECT_ITERATION_PATH_FIELD_ID, iterationPathProp));
-    const iterationPathResolution = await resolveOutboundIterationPath(rawIterationPathLabel, workItemId, defectPid);
+    const iterationPathResolution = await resolveOutboundIterationPath(rawIterationPathLabel, workItemId, defectPid, curIterationPath);
     const desiredIterationPath = iterationPathResolution.value;
     const iterationPathWarningDetails = iterationPathResolution.warningDetails;
     const assignedLabel = norm(firstNonEmpty(assignedToProp?.field_value));
@@ -843,7 +938,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
       };
     }
 
-    const areaPathResolution = await resolveOutboundAreaPath(assignedToTeamLabel, workItemId, defectPid);
+    const areaPathResolution = await resolveOutboundAreaPath(assignedToTeamLabel, workItemId, defectPid, curAreaPath);
     assignedToTeamLabel = areaPathResolution.value || DEFAULT_AREA_PATH;
     if (!assignedToTeamWarningDetails && areaPathResolution.warningDetails) {
       assignedToTeamWarningDetails = areaPathResolution.warningDetails;
@@ -868,22 +963,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     console.log("[Info] Assigned To Email:", userName);
     console.log("[Info] Assigned To Label:", assignedToLabel);
 
-    let adoCurrent;
-    try {
-      adoCurrent = await getAdoWorkItem(workItemId, constants.AZDO_TOKEN, constants.AzDoProjectURL);
-    } catch (e) {
-      console.error("[Error] Failed to read ADO work item:", e.response?.data || e.message);
-      emitFriendlyFailure({
-        platform: "ADO",
-        objectType: "Defect",
-        objectId: workItemId,
-        detail: "Unable to read the Azure DevOps work item."
-      });
-      return;
-    }
-
-    const cur = adoCurrent?.fields || {};
-
     const curTitle = norm(getAdoFieldValue(cur, adoFieldRefs.title));
     const curDescription = htmlToPlainText(getAdoFieldValue(cur, adoFieldRefs.reproSteps));
     const curSeverity = norm(getAdoFieldValue(cur, adoFieldRefs.severity));
@@ -900,11 +979,9 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const curApp = norm(getAdoFieldValue(cur, adoFieldRefs.application));
     const curSrc = norm(getAdoFieldValue(cur, adoFieldRefs.sourceTeam));
     const curSite = norm(getAdoFieldValue(cur, adoFieldRefs.siteName));
-    const curAreaPath = norm(getAdoFieldValue(cur, adoFieldRefs.areaPath));
     const curAssignedToRaw = getAdoFieldValue(cur, adoFieldRefs.assignedTo);
     const curAssignedTo = norm(extractAdoIdentityEmail(curAssignedToRaw));
     const curTargetDate = normalizeDateOnly(getAdoFieldValue(cur, adoFieldRefs.targetDate));
-    const curIterationPath = norm(getAdoFieldValue(cur, adoFieldRefs.iterationPath));
 
     const desiredDescription = stripEmbeddedAdoLinkText(description || "");
     const desiredDescriptionPlain = htmlToPlainText(desiredDescription);
