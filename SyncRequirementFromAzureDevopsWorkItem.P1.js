@@ -5,8 +5,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const qtestMetadataCache = {};
     const moduleChildrenCache = {};
     const emittedMessageKeys = new Set();
-    const DEFAULT_QTEST_ASSIGNED_TO_IDENTITY =
-        normalizeText(constants.RequirementAssignedToFallbackIdentity) || "ado-qtest-svc@bp.com";
     let adoFieldRefs = null;
     let relevantUpdatedFieldRefs = new Set();
 
@@ -78,6 +76,30 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
     function normalizeLabel(value) {
         return normalizeText(value).replace(/\s+/g, " ").toLowerCase();
+    }
+
+    function normalizeAssignedToText(value) {
+        if (!value) return "";
+
+        if (typeof value === "object") {
+            value =
+                value.displayName ||
+                value.name ||
+                value.uniqueName ||
+                value.mail ||
+                value.email ||
+                value.userPrincipalName ||
+                "";
+        }
+
+        if (typeof value !== "string") {
+            return "";
+        }
+
+        return value
+            .replace(/\s*<[^>]*>/g, "")
+            .replace(/_/g, " ")
+            .trim();
     }
 
     function firstNonEmpty(...values) {
@@ -361,109 +383,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         }
     }
 
-    function extractAdoAssignedToIdentity(value) {
-        if (!value) return "";
-        if (typeof value === "string") return normalizeText(value);
-        return normalizeText(
-            value.uniqueName ||
-            value.userPrincipalName ||
-            value.mail ||
-            value.email ||
-            value.displayName ||
-            value.name ||
-            ""
-        );
-    }
-
-    async function getProjectUsers() {
-        const cacheKey = `projectUsers:${constants.ProjectID}`;
-        if (qtestMetadataCache[cacheKey]) return qtestMetadataCache[cacheKey];
-
-        const url = `${normalizeBaseUrl(constants.ManagerURL)}/api/v3/projects/${constants.ProjectID}/users?inactive=false`;
-        console.log(`[Debug] Fetching active qTest project users from '${url}'.`);
-        try {
-            const response = await doRequest(url, "GET", null);
-            const users = normalizeFieldResponse(response);
-            qtestMetadataCache[cacheKey] = users;
-            return users;
-        } catch (error) {
-            emitFriendlyFailure({
-                platform: "qTest",
-                objectType: "Requirement",
-                objectId: event?.resource?.workItemId || event?.resource?.id || "Unknown",
-                fieldName: "Assigned To",
-                detail: "Unable to retrieve active qTest project users for Assigned To resolution.",
-                dedupKey: `requirement-project-users:${constants.ProjectID}`,
-            });
-            throw markFriendlyFailure(error);
-        }
-    }
-
-    function matchProjectUserIdentity(user, identity) {
-        const normalizedIdentity = normalizeLabel(identity);
-        if (!normalizedIdentity) return false;
-
-        return [
-            user?.username,
-            user?.ldap_username,
-            user?.external_user_name,
-        ].some(candidate => normalizeLabel(candidate) === normalizedIdentity);
-    }
-
-    async function findProjectUserIdByIdentity(identity) {
-        const normalizedIdentity = normalizeLabel(identity);
-        if (!normalizedIdentity) return null;
-
-        const users = await getProjectUsers();
-        const matchedUser = users.find(user => matchProjectUserIdentity(user, normalizedIdentity));
-        return matchedUser?.id ?? null;
-    }
-
-    async function resolveRequirementAssignedToUserId(adoAssignedTo, requirementContext = null) {
-        const sourceIdentity = extractAdoAssignedToIdentity(adoAssignedTo);
-        if (!sourceIdentity) {
-            return { userId: null, warningDetails: null };
-        }
-
-        const directUserId = await findProjectUserIdByIdentity(sourceIdentity);
-        if (directUserId) {
-            return { userId: directUserId, warningDetails: null };
-        }
-
-        if (DEFAULT_QTEST_ASSIGNED_TO_IDENTITY) {
-            const fallbackUserId = await findProjectUserIdByIdentity(DEFAULT_QTEST_ASSIGNED_TO_IDENTITY);
-            if (fallbackUserId) {
-                return {
-                    userId: fallbackUserId,
-                    warningDetails: {
-                        platform: "qTest",
-                        objectType: "Requirement",
-                        objectId: requirementContext?.id || event?.resource?.workItemId || event?.resource?.id || "Unknown",
-                        objectPid: requirementContext?.pid,
-                        fieldName: "Assigned To",
-                        fieldValue: sourceIdentity,
-                        detail: `ADO Assigned To '${sourceIdentity}' could not be resolved in qTest. Defaulted Assigned To to '${DEFAULT_QTEST_ASSIGNED_TO_IDENTITY}'.`,
-                        dedupKey: `requirement-assignedto-fallback:${normalizeLabel(sourceIdentity)}`,
-                    },
-                };
-            }
-        }
-
-        return {
-            userId: null,
-            warningDetails: {
-                platform: "qTest",
-                objectType: "Requirement",
-                objectId: requirementContext?.id || event?.resource?.workItemId || event?.resource?.id || "Unknown",
-                objectPid: requirementContext?.pid,
-                fieldName: "Assigned To",
-                fieldValue: sourceIdentity,
-                detail: `ADO Assigned To '${sourceIdentity}' could not be resolved in qTest, and fallback '${DEFAULT_QTEST_ASSIGNED_TO_IDENTITY}' was not found in the project. Assigned To was left unchanged.`,
-                dedupKey: `requirement-assignedto-missing:${normalizeLabel(sourceIdentity)}`,
-            },
-        };
-    }
-
     function buildRequirementDescription(eventData) {
         const fields = getFields(eventData);
         const workItemType = getAdoFieldValue(fields, adoFieldRefs.workItemType);
@@ -718,9 +637,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             properties.push({ field_id: constants.RequirementTypeFieldID, field_value: desiredState.typeValue });
         }
 
-        if (desiredState.assignedToUserId) {
-            properties.push({ field_id: constants.RequirementAssignedToFieldID, field_value: desiredState.assignedToUserId });
-        }
+        properties.push({ field_id: constants.RequirementAssignedToFieldID, field_value: desiredState.assignedToText || "" });
 
         if (desiredState.iterationPathValue && normalizeText(constants.RequirementIterationPathFieldID)) {
             properties.push({ field_id: constants.RequirementIterationPathFieldID, field_value: desiredState.iterationPathValue });
@@ -921,8 +838,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             }
         }
 
-        const assignedToResolution = await resolveRequirementAssignedToUserId(adoAssignedTo, requirementContext);
-        if (assignedToResolution.warningDetails) warnings.push(assignedToResolution.warningDetails);
+        const assignedToText = normalizeAssignedToText(adoAssignedTo);
 
         return {
             workItemId,
@@ -934,7 +850,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             workItemTypeValue,
             priorityValue,
             typeValue,
-            assignedToUserId: assignedToResolution.userId,
+            assignedToText,
             iterationPathValue: iterationResolution.value,
             applicationNameValue,
             fitGapValue,

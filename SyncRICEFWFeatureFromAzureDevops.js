@@ -4,8 +4,6 @@ const { Webhooks } = require("@qasymphony/pulse-sdk");
 exports.handler = async function ({ event, constants, triggers }, context, callback) {
     const qtestMetadataCache = {};
     const emittedMessageKeys = new Set();
-    const DEFAULT_QTEST_ASSIGNED_TO_IDENTITY =
-        normalizeText(constants.RequirementAssignedToFallbackIdentity) || "ado-qtest-svc@bp.com";
     let adoFieldRefs = null;
     let relevantUpdatedFieldRefs = new Set();
 
@@ -210,7 +208,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         const reason = getAdoFieldValue(fields, adoFieldRefs.reason) || "";
         const acceptanceCriteria = getAdoFieldValue(fields, adoFieldRefs.acceptanceCriteria) || "";
         const description = getAdoFieldValue(fields, adoFieldRefs.description) || "";
-        const processRelease = getAdoFieldValue(fields, adoFieldRefs.processRelease) || "";
         const ricefwId = getAdoFieldValue(fields, adoFieldRefs.ricefwId) || "";
         const htmlHref = firstNonEmpty(eventData?.resource?._links?.html?.href, eventData?.resource?.revision?._links?.html?.href);
 
@@ -221,7 +218,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
                 <b>State:</b> ${state}<br>
                 <b>Reason:</b> ${reason}<br>
                 <b>RICEFW ID:</b> ${ricefwId}<br>
-                <b>Process Release:</b> ${processRelease}<br>
                 <b>Acceptance Criteria:</b> ${acceptanceCriteria}<br>
                 <b>Description:</b> ${description}`;
     }
@@ -278,12 +274,9 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             acceptanceCriteria: normalizeText(constants.AzDoAcceptanceCriteriaFieldRef),
             priority: normalizeText(constants.AzDoPriorityFieldRef),
             complexity: normalizeText(constants.AzDoComplexityFieldRef),
-            applicationName: normalizeText(constants.AzDoApplicationNameFieldRef),
-            processRelease: normalizeText(constants.AzDoProcessReleaseFieldRef),
             ricefwId: normalizeText(constants.AzDoRICEFWIdFieldRef),
             testingStatus: normalizeText(constants.AzDoTestingStatusFieldRef),
             featureType: normalizeText(constants.AzDoBPFeatureTypeFieldRef),
-            area: normalizeText(constants.AzDoAreaFieldRef),
             ricefwConfiguration: normalizeText(constants.AzDoRICEFWConfigurationFieldRef),
         };
     }
@@ -301,12 +294,9 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             adoFieldRefs.acceptanceCriteria,
             adoFieldRefs.priority,
             adoFieldRefs.complexity,
-            adoFieldRefs.applicationName,
-            adoFieldRefs.processRelease,
             adoFieldRefs.ricefwId,
             adoFieldRefs.testingStatus,
             adoFieldRefs.featureType,
-            adoFieldRefs.area,
             adoFieldRefs.ricefwConfiguration,
         ].filter(Boolean));
     }
@@ -322,12 +312,8 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             "RequirementReasonFieldID",
             "RequirementAcceptanceCriteriaFieldID",
             "RequirementPlainDescriptionFieldID",
-            "RequirementProcessReleaseFieldID",
-            "RequirementRicefwIdFieldID",
             "RequirementRICEFWConfigurationFieldID",
-            "RequirementTestingStatusFieldID",
-            "RequirementFeatureTypeFieldID",
-            "RequirementAreaFieldID",
+            "RequirementStatusFieldID",
             "FeatureParentID",
         ].filter(name => !normalizeText(constants[name]));
 
@@ -347,7 +333,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         const requiredAdoRefKeys = [
             "title", "workItemType", "areaPath", "iterationPath", "state", "reason",
             "assignedTo", "description", "acceptanceCriteria", "priority", "complexity",
-            "processRelease", "ricefwId", "testingStatus", "featureType", "area",
+            "ricefwId", "testingStatus", "featureType",
             "ricefwConfiguration",
         ];
         const missingAdoRefs = requiredAdoRefKeys.filter(key => !adoFieldRefs[key]);
@@ -495,102 +481,8 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         }
     }
 
-    function extractAdoAssignedToIdentity(value) {
-        if (!value) return "";
-        if (typeof value === "string") return normalizeText(value);
-        return normalizeText(
-            value.uniqueName ||
-            value.userPrincipalName ||
-            value.mail ||
-            value.email ||
-            value.displayName ||
-            value.name ||
-            ""
-        );
-    }
-
-    async function getProjectUsers() {
-        const cacheKey = `projectUsers:${constants.ProjectID}`;
-        if (qtestMetadataCache[cacheKey]) return qtestMetadataCache[cacheKey];
-
-        const url = `${normalizeBaseUrl(constants.ManagerURL)}/api/v3/projects/${constants.ProjectID}/users?inactive=false`;
-        try {
-            const response = await doRequest(url, "GET", null);
-            const users = normalizeFieldResponse(response);
-            qtestMetadataCache[cacheKey] = users;
-            return users;
-        } catch (error) {
-            emitFriendlyFailure({
-                platform: "qTest",
-                objectType: "RICEFW/Feature",
-                objectId: event?.resource?.workItemId || event?.resource?.id || "Unknown",
-                fieldName: "Assigned To",
-                detail: "Unable to retrieve active qTest project users for Assigned To resolution.",
-                dedupKey: `ricefw-project-users:${constants.ProjectID}`,
-            });
-            throw markFriendlyFailure(error);
-        }
-    }
-
-    function matchProjectUserIdentity(user, identity) {
-        const normalizedIdentity = normalizeLabel(identity);
-        if (!normalizedIdentity) return false;
-
-        return [
-            user?.username,
-            user?.ldap_username,
-            user?.external_user_name,
-        ].some(candidate => normalizeLabel(candidate) === normalizedIdentity);
-    }
-
-    async function findProjectUserIdByIdentity(identity) {
-        const normalizedIdentity = normalizeLabel(identity);
-        if (!normalizedIdentity) return null;
-
-        const users = await getProjectUsers();
-        const matchedUser = users.find(user => matchProjectUserIdentity(user, normalizedIdentity));
-        return matchedUser?.id ?? null;
-    }
-
-    async function resolveRequirementAssignedToUserId(adoAssignedTo, requirementContext = null) {
-        const sourceIdentity = extractAdoAssignedToIdentity(adoAssignedTo);
-        if (!sourceIdentity) return { userId: null, warningDetails: null };
-
-        const directUserId = await findProjectUserIdByIdentity(sourceIdentity);
-        if (directUserId) return { userId: directUserId, warningDetails: null };
-
-        if (DEFAULT_QTEST_ASSIGNED_TO_IDENTITY) {
-            const fallbackUserId = await findProjectUserIdByIdentity(DEFAULT_QTEST_ASSIGNED_TO_IDENTITY);
-            if (fallbackUserId) {
-                return {
-                    userId: fallbackUserId,
-                    warningDetails: {
-                        platform: "qTest",
-                        objectType: "RICEFW/Feature",
-                        objectId: requirementContext?.id || event?.resource?.workItemId || event?.resource?.id || "Unknown",
-                        objectPid: requirementContext?.pid,
-                        fieldName: "Assigned To",
-                        fieldValue: sourceIdentity,
-                        detail: `ADO Assigned To '${sourceIdentity}' could not be resolved in qTest. Defaulted Assigned To to '${DEFAULT_QTEST_ASSIGNED_TO_IDENTITY}'.`,
-                        dedupKey: `ricefw-assignedto-fallback:${normalizeLabel(sourceIdentity)}`,
-                    },
-                };
-            }
-        }
-
-        return {
-            userId: null,
-            warningDetails: {
-                platform: "qTest",
-                objectType: "RICEFW/Feature",
-                objectId: requirementContext?.id || event?.resource?.workItemId || event?.resource?.id || "Unknown",
-                objectPid: requirementContext?.pid,
-                fieldName: "Assigned To",
-                fieldValue: sourceIdentity,
-                detail: `ADO Assigned To '${sourceIdentity}' could not be resolved in qTest, and fallback '${DEFAULT_QTEST_ASSIGNED_TO_IDENTITY}' was not found in the project. Assigned To was left unchanged.`,
-                dedupKey: `ricefw-assignedto-missing:${normalizeLabel(sourceIdentity)}`,
-            },
-        };
+    function resolveRequirementAssignedToText(adoAssignedTo) {
+        return normalizeAssignedTo(adoAssignedTo);
     }
 
     async function doRequest(url, method, requestBody) {
@@ -832,6 +724,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             { field_id: constants.RequirementReasonFieldID, field_value: desiredState.reasonValue || "" },
             { field_id: constants.RequirementAcceptanceCriteriaFieldID, field_value: desiredState.acceptanceCriteriaValue || "" },
             { field_id: constants.RequirementPlainDescriptionFieldID, field_value: desiredState.plainDescriptionValue || "" },
+            { field_id: constants.RequirementAssignedToFieldID, field_value: desiredState.assignedToText || "" },
         ];
 
         if (normalizeText(constants.RequirementComplexityFieldID) && desiredState.complexityValue) {
@@ -843,32 +736,14 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         if (normalizeText(constants.RequirementTypeFieldID) && desiredState.typeValue) {
             properties.push({ field_id: constants.RequirementTypeFieldID, field_value: desiredState.typeValue });
         }
-        if (desiredState.assignedToUserId) {
-            properties.push({ field_id: constants.RequirementAssignedToFieldID, field_value: desiredState.assignedToUserId });
-        }
         if (desiredState.iterationPathValue) {
             properties.push({ field_id: constants.RequirementIterationPathFieldID, field_value: desiredState.iterationPathValue });
-        }
-        if (normalizeText(constants.RequirementApplicationNameFieldID) && desiredState.applicationNameValue) {
-            properties.push({ field_id: constants.RequirementApplicationNameFieldID, field_value: desiredState.applicationNameValue });
-        }
-        if (desiredState.processReleaseValue) {
-            properties.push({ field_id: constants.RequirementProcessReleaseFieldID, field_value: desiredState.processReleaseValue });
-        }
-        if (desiredState.ricefwIdValue) {
-            properties.push({ field_id: constants.RequirementRicefwIdFieldID, field_value: desiredState.ricefwIdValue });
         }
         if (desiredState.ricefwConfigurationValue) {
             properties.push({ field_id: constants.RequirementRICEFWConfigurationFieldID, field_value: desiredState.ricefwConfigurationValue });
         }
         if (desiredState.testingStatusValue) {
-            properties.push({ field_id: constants.RequirementTestingStatusFieldID, field_value: desiredState.testingStatusValue });
-        }
-        if (desiredState.featureTypeFieldValue) {
-            properties.push({ field_id: constants.RequirementFeatureTypeFieldID, field_value: desiredState.featureTypeFieldValue });
-        }
-        if (desiredState.areaValue) {
-            properties.push({ field_id: constants.RequirementAreaFieldID, field_value: desiredState.areaValue });
+            properties.push({ field_id: constants.RequirementStatusFieldID, field_value: desiredState.testingStatusValue });
         }
 
         return properties;
@@ -930,30 +805,15 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         const typeValue = normalizeText(constants.RequirementTypeFieldID)
             ? await resolveOptionalRequirementFieldValue(constants.RequirementTypeFieldID, adoFeatureType, "Requirement Category", requirementContext).then(result => { if (result.warningDetails) warnings.push(result.warningDetails); return result.value; })
             : null;
-
-        const assignedToResolution = await resolveRequirementAssignedToUserId(fields[adoFieldRefs.assignedTo], requirementContext);
-        if (assignedToResolution.warningDetails) warnings.push(assignedToResolution.warningDetails);
+        const assignedToText = resolveRequirementAssignedToText(fields[adoFieldRefs.assignedTo]);
 
         const iterationResolution = await resolveOptionalRequirementFieldValue(constants.RequirementIterationPathFieldID, adoIterationPath, "Iteration Path", requirementContext);
         if (iterationResolution.warningDetails) warnings.push(iterationResolution.warningDetails);
 
-        let applicationNameValue = null;
-        if (normalizeText(constants.RequirementApplicationNameFieldID) && getAdoFieldValue(fields, adoFieldRefs.applicationName)) {
-            const resolution = await resolveOptionalRequirementFieldValue(constants.RequirementApplicationNameFieldID, getAdoFieldValue(fields, adoFieldRefs.applicationName), "Application Name", requirementContext);
-            applicationNameValue = resolution.value;
-            if (resolution.warningDetails) warnings.push(resolution.warningDetails);
-        }
-
-        const processReleaseResolution = await resolveOptionalRequirementFieldValue(constants.RequirementProcessReleaseFieldID, getAdoFieldValue(fields, adoFieldRefs.processRelease), "Process Release", requirementContext);
-        if (processReleaseResolution.warningDetails) warnings.push(processReleaseResolution.warningDetails);
         const ricefwConfigurationResolution = await resolveOptionalRequirementFieldValue(constants.RequirementRICEFWConfigurationFieldID, getAdoFieldValue(fields, adoFieldRefs.ricefwConfiguration), "RICEFW Configuration", requirementContext);
         if (ricefwConfigurationResolution.warningDetails) warnings.push(ricefwConfigurationResolution.warningDetails);
-        const testingStatusResolution = await resolveOptionalRequirementFieldValue(constants.RequirementTestingStatusFieldID, getAdoFieldValue(fields, adoFieldRefs.testingStatus), "Testing Status", requirementContext);
+        const testingStatusResolution = await resolveOptionalRequirementFieldValue(constants.RequirementStatusFieldID, getAdoFieldValue(fields, adoFieldRefs.testingStatus), "Testing Status", requirementContext);
         if (testingStatusResolution.warningDetails) warnings.push(testingStatusResolution.warningDetails);
-        const featureTypeFieldResolution = await resolveOptionalRequirementFieldValue(constants.RequirementFeatureTypeFieldID, adoFeatureType, "Feature Type", requirementContext);
-        if (featureTypeFieldResolution.warningDetails) warnings.push(featureTypeFieldResolution.warningDetails);
-        const areaResolution = await resolveOptionalRequirementFieldValue(constants.RequirementAreaFieldID, getAdoFieldValue(fields, adoFieldRefs.area), "Area", requirementContext);
-        if (areaResolution.warningDetails) warnings.push(areaResolution.warningDetails);
         const stateResolution = await resolveOptionalRequirementFieldValue(constants.RequirementStateFieldID, getAdoFieldValue(fields, adoFieldRefs.state), "State", requirementContext);
         if (stateResolution.warningDetails) warnings.push(stateResolution.warningDetails);
         const reasonResolution = await resolveOptionalRequirementFieldValue(constants.RequirementReasonFieldID, getAdoFieldValue(fields, adoFieldRefs.reason), "Reason", requirementContext);
@@ -968,19 +828,14 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             workItemTypeValue,
             priorityValue,
             typeValue,
-            assignedToUserId: assignedToResolution.userId,
+            assignedToText,
             iterationPathValue: iterationResolution.value,
-            applicationNameValue,
             stateValue: stateResolution.value,
             reasonValue: reasonResolution.value,
             acceptanceCriteriaValue: getAdoFieldValue(fields, adoFieldRefs.acceptanceCriteria) || "",
             plainDescriptionValue: getAdoFieldValue(fields, adoFieldRefs.description) || "",
-            processReleaseValue: processReleaseResolution.value,
-            ricefwIdValue: getAdoFieldValue(fields, adoFieldRefs.ricefwId) || null,
             ricefwConfigurationValue: ricefwConfigurationResolution.value,
             testingStatusValue: testingStatusResolution.value,
-            featureTypeFieldValue: featureTypeFieldResolution.value,
-            areaValue: areaResolution.value,
             targetModuleId: await ensureModulePath(constants.FeatureParentID, adoAreaPath, adoIterationPath),
             warnings,
         };
