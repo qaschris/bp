@@ -47,6 +47,16 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         return normalizeText(value).replace(/\s+/g, " ").toLowerCase();
     }
 
+    function normalizeAdoPicklistValue(value) {
+        return normalizeText(value).replace(/\s+/g, " ").trim();
+    }
+
+    function describeCodePoints(value) {
+        return Array.from(String(value || ""))
+            .map(ch => `U+${ch.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}`)
+            .join(" ");
+    }
+
     function buildAdoFieldRefs() {
         return {
             title: normalizeText(constants.AzDoTitleFieldRef),
@@ -1091,13 +1101,15 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             console.log(`[Info] Skipping External Reference — no value in qTest`);
         }
 
-        if (qtestRootCause) {
+        const normalizedRootCause = normalizeAdoPicklistValue(qtestRootCause);
+        if (normalizedRootCause) {
             requestBody.push({
                 op: "add",
                 path: `/fields/${adoFieldRefs.rootCause}`,
-                value: qtestRootCause
+                value: normalizedRootCause
             });
-            console.log(`[Info] Added Root Cause to ADO: ${qtestRootCause}`);
+            console.log(`[Info] Added Root Cause to ADO: ${normalizedRootCause}`);
+            console.log(`[Debug] Root Cause code points: ${describeCodePoints(normalizedRootCause)}`);
         } else {
             console.log(`[Info] Skipping Root Cause — no value in qTest`);
         }

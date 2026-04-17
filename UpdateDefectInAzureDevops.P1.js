@@ -83,6 +83,16 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     return normalizeText(value).replace(/\s+/g, " ").toLowerCase();
   }
 
+  function normalizeAdoPicklistValue(value) {
+    return normalizeText(value).replace(/\s+/g, " ").trim();
+  }
+
+  function describeCodePoints(value) {
+    return Array.from(String(value || ""))
+      .map(ch => `U+${ch.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}`)
+      .join(" ");
+  }
+
   // Legacy helper retained only for compatibility. The active Source Team path
   // now sends and compares the raw sanitized value directly, without any dash
   // replacement logic.
@@ -886,7 +896,9 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
       rawValue: rootCauseProp?.field_value ?? null,
       rawLabel: rootCauseProp?.field_value_name ?? null,
     });
-    const rootCauseLabel = await getDefectFieldLabel(constants.DefectRootCauseFieldID, rootCauseProp);
+    const rootCauseLabel = normalizeAdoPicklistValue(
+      await getDefectFieldLabel(constants.DefectRootCauseFieldID, rootCauseProp)
+    );
     const resolvedReasonLabel = await getDefectFieldLabel(constants.DefectResolvedReasonFieldID, resolvedReasonProp);
 
     let userName = "";
@@ -1028,7 +1040,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const curDefectType = norm(getAdoFieldValue(cur, adoFieldRefs.defectType));
     const curExternalReference = norm(getAdoFieldValue(cur, adoFieldRefs.externalReference));
     const curBugStage = norm(getAdoFieldValue(cur, adoFieldRefs.bugStage));
-    const curRootCause = norm(getAdoFieldValue(cur, adoFieldRefs.rootCause, { preferFormatted: true }));
+    const curRootCause = normalizeAdoPicklistValue(getAdoFieldValue(cur, adoFieldRefs.rootCause, { preferFormatted: true }));
     const curProposedFix = htmlToPlainText(getAdoFieldValue(cur, adoFieldRefs.proposedFix));
     const curClosedDate = normalizeUtcDateTime(getAdoFieldValue(cur, adoFieldRefs.closedDate));
     const curResolvedReason = norm(getAdoFieldValue(cur, adoFieldRefs.resolvedReason, { preferFormatted: true }));
@@ -1094,6 +1106,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
     if (rootCauseLabel && curRootCause !== rootCauseLabel) {
       console.log("[Info] Updating Root Cause:", { from: curRootCause || "(empty)", to: rootCauseLabel });
+      console.log(`[Debug] Root Cause code points: ${describeCodePoints(rootCauseLabel)}`);
       patchData.push(buildFieldPatchOperation(adoFieldRefs.rootCause, rootCauseLabel));
     }
 
