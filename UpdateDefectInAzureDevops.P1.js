@@ -140,6 +140,38 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     return [...aliases].filter(Boolean);
   }
 
+  function selectPreferredAdoFieldPath(aliases, classificationType) {
+    if (!Array.isArray(aliases) || !aliases.length) {
+      return "";
+    }
+
+    const structuralNames = getClassificationStructuralSegmentNames(classificationType);
+    const rankedAliases = aliases
+      .map(alias => {
+        const normalizedAlias = normalizeAdoIterationPath(alias);
+        const segments = normalizedAlias.split("\\").filter(Boolean);
+        const secondSegment = segments[1]?.toLowerCase() || "";
+        const hasStructuralSecondSegment = structuralNames.has(secondSegment);
+
+        return {
+          alias: normalizedAlias,
+          hasStructuralSecondSegment,
+          segmentCount: segments.length,
+        };
+      })
+      .filter(item => item.alias);
+
+    rankedAliases.sort((left, right) => {
+      if (left.hasStructuralSecondSegment !== right.hasStructuralSecondSegment) {
+        return left.hasStructuralSecondSegment ? 1 : -1;
+      }
+
+      return right.segmentCount - left.segmentCount;
+    });
+
+    return rankedAliases[0]?.alias || "";
+  }
+
   function extractAdoIdentityEmail(v) {
     if (!v) return "";
     if (typeof v === "string") return v.trim();
@@ -194,21 +226,24 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
       const fallbackPath = [parentPath, normalizeText(node.name)]
         .filter(Boolean)
         .join("\\");
-      const primaryPath = normalizeAdoIterationPath(node.path || fallbackPath);
       const candidatePaths = [node.path, fallbackPath];
+      const allAliases = candidatePaths.flatMap(candidatePath =>
+        buildAdoClassificationPathAliases(candidatePath, classificationType)
+      );
+      const preferredFieldPath = selectPreferredAdoFieldPath(allAliases, classificationType);
 
       for (const candidatePath of candidatePaths) {
         const aliases = buildAdoClassificationPathAliases(candidatePath, classificationType);
         for (const alias of aliases) {
           const normalizedAlias = normalizeLookupLabel(alias);
           if (!pathLookup.has(normalizedAlias)) {
-            pathLookup.set(normalizedAlias, primaryPath || alias);
+            pathLookup.set(normalizedAlias, preferredFieldPath || normalizeAdoIterationPath(alias));
           }
         }
       }
 
       if (Array.isArray(node.children)) {
-        node.children.forEach(child => visitNode(child, primaryPath || fallbackPath));
+        node.children.forEach(child => visitNode(child, preferredFieldPath || fallbackPath));
       }
     };
 
@@ -1203,6 +1238,16 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
       }
     } catch (err) {
       console.error("[Error] Azure update failed:", err.response?.data || err.message);
+      if (err?.response?.status) {
+        console.error("[Error] Azure update status:", err.response.status);
+      }
+      if (err?.response?.data) {
+        try {
+          console.error("[Error] Azure update response body:", JSON.stringify(err.response.data, null, 2));
+        } catch (stringifyError) {
+          console.error("[Error] Azure update response body could not be stringified:", stringifyError.message);
+        }
+      }
       emitFriendlyFailure({
         platform: "ADO",
         objectType: "Defect",
