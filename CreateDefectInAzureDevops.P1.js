@@ -76,7 +76,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             application: normalizeText(constants.AzDoApplicationFieldRef),
             siteName: normalizeText(constants.AzDoSiteNameFieldRef),
             iterationPath: normalizeText(constants.AzDoIterationPathFieldRef),
-            closedDate: normalizeText(constants.AzDoClosedDateFieldRef),
             resolvedReason: normalizeText(constants.AzDoResolvedReasonFieldRef),
             targetDate: normalizeText(constants.AzDoTargetDateFieldRef),
         };
@@ -678,7 +677,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         const siteNameField = getFieldById(defect, DEFECT_SITE_NAME_FIELD_ID);
         const rootCauseField = constants.DefectRootCauseFieldID ? getFieldById(defect, constants.DefectRootCauseFieldID) : null;
         const proposedFixField = constants.DefectProposedFixFieldID ? getFieldById(defect, constants.DefectProposedFixFieldID) : null;
-        const closedDateField = constants.DefectClosedDateFieldID ? getFieldById(defect, constants.DefectClosedDateFieldID) : null;
         const resolvedReasonField = constants.DefectResolvedReasonFieldID ? getFieldById(defect, constants.DefectResolvedReasonFieldID) : null;
         const assignedToField = constants.DefectAssignedToFieldID ? getFieldById(defect, constants.DefectAssignedToFieldID) : null;
         const targetDateField = getFieldById(defect, constants.DefectTargetDateFieldID);
@@ -770,9 +768,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         const proposedFix = proposedFixField ? proposedFixField.field_value : null;
         console.log(`[Info] Defect Proposed Fix length: ${proposedFix ? proposedFix.length : 0}`);
 
-        const closedDate = closedDateField ? closedDateField.field_value : null;
-        console.log(`[Info] Defect Closed Date: ${closedDate}`);
-
         const resolvedReason = await getDefectFieldLabel(constants.DefectResolvedReasonFieldID, resolvedReasonField);
         console.log(`[Info] Defect Resolved Reason: ${resolvedReason}`);
 
@@ -856,7 +851,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             siteName,
             rootCause,
             proposedFix,
-            closedDate,
             resolvedReason,
             assignedToIdentity,
             assignedToWarning,
@@ -992,7 +986,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         qtestExternalReference,
         qtestRootCause,
         qtestProposedFix,
-        qtestClosedDate,
         qtestResolvedReason,
         qtestAssignedToIdentity,
         qtestAssignedToTeamLabel,
@@ -1270,7 +1263,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         qtestSiteName,
         qtestRootCause,
         qtestProposedFix,
-        qtestClosedDate,
         qtestResolvedReason,
         qtestAssignedToIdentity,
         qtestAssignedToTeamLabel,
@@ -1613,7 +1605,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         defectDetails.siteName,
         defectDetails.rootCause,
         defectDetails.proposedFix,
-        defectDetails.closedDate,
         defectDetails.resolvedReason,
         defectDetails.assignedToIdentity,
         defectDetails.assignedToTeamLabel,

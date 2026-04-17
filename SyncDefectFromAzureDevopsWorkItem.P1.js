@@ -250,8 +250,8 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             severity: normalizeText(constants.AzDoSeverityFieldRef),
             priority: normalizeText(constants.AzDoPriorityFieldRef),
             defectType: normalizeText(constants.AzDoDefectTypeFieldRef),
+            rootCause: normalizeText(constants.AzDoRootCauseFieldRef),
             proposedFix: normalizeText(constants.AzDoProposedFixFieldRef),
-            closedDate: normalizeText(constants.AzDoClosedDateFieldRef),
             targetDate: normalizeText(constants.AzDoTargetDateFieldRef),
             externalReference: normalizeText(constants.AzDoExternalReferenceFieldRef),
             resolvedReason: normalizeText(constants.AzDoResolvedReasonFieldRef),
@@ -273,6 +273,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             "DefectPriorityFieldID",
             "DefectTypeFieldID",
             "DefectStatusFieldID",
+            "DefectRootCauseFieldID",
             "DefectExternalReferenceFieldID",
             "DefectResolvedReasonFieldID",
             "DefectAssignedToFieldID",
@@ -300,8 +301,8 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             "severity",
             "priority",
             "defectType",
+            "rootCause",
             "proposedFix",
-            "closedDate",
             "targetDate",
             "externalReference",
             "resolvedReason",
@@ -698,10 +699,10 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         iterationPathValue,
         severityValue,
         priorityValue,
+        rootCauseValue,
         defectTypeValue,
         statusValue,
         proposedFixValue,
-        closedDateValue,
         resolvedReasonValue,
         assignedToUserId,
         targetDateValue,
@@ -795,6 +796,15 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             });
         }
 
+        if (constants.DefectRootCauseFieldID && rootCauseValue !== null && rootCauseValue !== undefined && rootCauseValue !== "") {
+            const parsedRootCauseValue = parseInt(rootCauseValue, 10);
+            requestBody.properties.push({
+                field_id: constants.DefectRootCauseFieldID,
+                field_value: Number.isNaN(parsedRootCauseValue) ? rootCauseValue : parsedRootCauseValue,
+            });
+            console.log(`[Info] Added Root Cause '${rootCauseValue}' to qTest update payload.`);
+        }
+
         if (defectTypeValue) {
             requestBody.properties.push({
                 field_id: constants.DefectTypeFieldID,
@@ -830,19 +840,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
                 field_value: adoExternalReference || "",
             });
             console.log(`[Info] Added External Reference to qTest update payload.`);
-        }
-
-        if (constants.DefectClosedDateFieldID && closedDateValue !== null && closedDateValue !== undefined && closedDateValue !== "") {
-            const parsedClosedDateFieldId = parseInt(constants.DefectClosedDateFieldID, 10);
-            requestBody.properties.push({
-                field_id: Number.isNaN(parsedClosedDateFieldId)
-                    ? constants.DefectClosedDateFieldID
-                    : parsedClosedDateFieldId,
-                field_value: closedDateValue,
-            });
-            console.log(`[Info] Added Closed Date '${closedDateValue}' to qTest update payload.`);
-        } else {
-            console.log(`[Info] No Closed Date provided for qTest update payload.`);
         }
 
         if (constants.DefectResolvedReasonFieldID && resolvedReasonValue !== null && resolvedReasonValue !== undefined) {
@@ -1173,13 +1170,35 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         console.log(`[Warn] ADO State '${adoState}' does not match any defined qTest status.`);
     }
 
+    const adoRootCauseRaw = adoFieldRefs.rootCause ? fields?.[adoFieldRefs.rootCause] : "";
+    const adoRootCauseFormatted = adoFieldRefs.rootCause
+        ? fields?.[`${adoFieldRefs.rootCause}@OData.Community.Display.V1.FormattedValue`]
+        : "";
+    const adoRootCause = getAdoFieldValue(fields, adoFieldRefs.rootCause, { preferFormatted: true });
+    console.log(`[Debug] ADO Root Cause diagnostics: ${safeJson({
+        fieldRef: adoFieldRefs.rootCause,
+        raw: adoRootCauseRaw,
+        formatted: adoRootCauseFormatted,
+        selected: adoRootCause,
+    })}`);
+
+    const qtestRootCauseResult = await resolveOptionalDefectFieldValue(
+        constants.DefectRootCauseFieldID,
+        adoRootCause,
+        "Root Cause",
+        defectContext
+    );
+    const qtestRootCauseValue = qtestRootCauseResult.value;
+    if (qtestRootCauseValue) {
+        console.log(`[Info] Mapped ADO Root Cause '${adoRootCause}' to qTest Root Cause value '${qtestRootCauseValue}'`);
+    } else if (adoRootCause) {
+        console.log(`[Warn] ADO Root Cause '${adoRootCause}' could not be mapped to qTest. Root Cause update will be skipped.`);
+    }
+
     const adoProposedFix = getAdoFieldValue(fields, adoFieldRefs.proposedFix);
     console.log(`[Info] ADO Proposed Fix value length: ${adoProposedFix.length}`);
 
     const qtestProposedFixValue = adoProposedFix;
-
-    const adoActualCloseDate = getAdoFieldValue(fields, adoFieldRefs.closedDate);
-    let qtestClosedDateValue = null;
 
     const adoTargetDate = getAdoFieldValue(fields, adoFieldRefs.targetDate);
     let qtestTargetDateValue = null;
@@ -1190,13 +1209,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
     const adoExternalReference = getAdoFieldValue(fields, adoFieldRefs.externalReference);
     console.log(`[Info] ADO External Reference value: '${adoExternalReference}'`);
-
-    if (adoActualCloseDate) {
-        qtestClosedDateValue = formatQtestUtcDateTime(adoActualCloseDate);
-        console.log(`[Info] ADO Actual Close Date: '${adoActualCloseDate}' => qTest Closed Date: '${qtestClosedDateValue}'`);
-    } else {
-        console.log(`[Info] No Actual Close Date found in ADO.`);
-    }
 
     const adoBugStage = adoFieldRefs.bugStage
         ? getAdoFieldValue(fields, adoFieldRefs.bugStage, { preferFormatted: true })
@@ -1358,10 +1370,10 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             qtestIterationPathValue,
             qtestSeverityValue,
             qtestPriorityValue,
+            qtestRootCauseValue,
             qtestDefectTypeValue,
             qtestStatusValue,
             qtestProposedFixValue,
-            qtestClosedDateValue,
             qtestResolvedReasonValue,
             qtestAssignedToUserId,
             qtestTargetDateValue,
@@ -1382,6 +1394,10 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
             if (assignedToTeamWarningDetails) {
                 emitFriendlyWarning(assignedToTeamWarningDetails);
+            }
+
+            if (qtestRootCauseResult.warningDetails) {
+                emitFriendlyWarning(qtestRootCauseResult.warningDetails);
             }
 
             if (affectedReleaseWarningDetails) {

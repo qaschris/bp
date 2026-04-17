@@ -421,7 +421,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
       bugStage: normalizeText(constants.AzDoBugStageFieldRef),
       rootCause: normalizeText(constants.AzDoRootCauseFieldRef),
       proposedFix: normalizeText(constants.AzDoProposedFixFieldRef),
-      closedDate: normalizeText(constants.AzDoClosedDateFieldRef),
       resolvedReason: normalizeText(constants.AzDoResolvedReasonFieldRef),
       application: normalizeText(constants.AzDoApplicationFieldRef),
       sourceTeam: normalizeText(constants.AzDoSourceTeamFieldRef),
@@ -473,7 +472,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
       "bugStage",
       "rootCause",
       "proposedFix",
-      "closedDate",
       "resolvedReason",
       "areaPath",
       "assignedTo",
@@ -860,7 +858,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const externalReferenceProp = getPropById(constants.DefectExternalReferenceFieldID);
     const rootCauseProp = constants.DefectRootCauseFieldID ? getPropById(constants.DefectRootCauseFieldID) : null;
     const proposedFixProp = constants.DefectProposedFixFieldID ? getPropById(constants.DefectProposedFixFieldID) : null;
-    const closedDateProp = constants.DefectClosedDateFieldID ? getPropById(constants.DefectClosedDateFieldID) : null;
     const resolvedReasonProp = constants.DefectResolvedReasonFieldID ? getPropById(constants.DefectResolvedReasonFieldID) : null;
     const assignedToProp = getPropById(constants.DefectAssignedToFieldID);
     const assignedToTeamProp = getPropById(constants.DefectAssignedToTeamFieldID);
@@ -880,7 +877,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const assignedToLabel = norm(firstNonEmpty(assignedToProp?.field_value_name));
     const externalReference = norm(firstNonEmpty(externalReferenceProp?.field_value));
     const proposedFix = firstNonEmpty(proposedFixProp?.field_value);
-    const closedDate = norm(firstNonEmpty(closedDateProp?.field_value));
     const mappedSeverity = mapSeverity(severityProp?.field_value);
     const mappedPriority = mapPriority(priorityProp?.field_value);
     const mappedDefectType = mapDefectType(defectTypeProp?.field_value);
@@ -1042,7 +1038,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const curBugStage = norm(getAdoFieldValue(cur, adoFieldRefs.bugStage));
     const curRootCause = normalizeAdoPicklistValue(getAdoFieldValue(cur, adoFieldRefs.rootCause, { preferFormatted: true }));
     const curProposedFix = htmlToPlainText(getAdoFieldValue(cur, adoFieldRefs.proposedFix));
-    const curClosedDate = normalizeUtcDateTime(getAdoFieldValue(cur, adoFieldRefs.closedDate));
     const curResolvedReason = norm(getAdoFieldValue(cur, adoFieldRefs.resolvedReason, { preferFormatted: true }));
     const curApp = norm(getAdoFieldValue(cur, adoFieldRefs.application));
     const curSrc = norm(getAdoFieldValue(cur, adoFieldRefs.sourceTeam));
@@ -1056,9 +1051,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const desiredProposedFix = proposedFix || "";
     const desiredProposedFixPlain = htmlToPlainText(desiredProposedFix);
     const desiredTargetDate = formatDateOnly(targetDate);
-    const desiredClosedDate = formatUtcDateTime(closedDate);
-    const shouldSyncClosedDate = ["Closed", "Rejected", "Resolved"].includes(mappedStatus);
-
     console.log("curTargetDate", curTargetDate);
     console.log("newTargetDate", desiredTargetDate, isoDate);
     console.log("[Info] Current ADO Resolved Reason:", curResolvedReason || "(empty)");
@@ -1115,13 +1107,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     if (curProposedFix !== desiredProposedFixPlain) {
       console.log("[Info] Updating Proposed Fix.");
       patchData.push(buildFieldPatchOperation(adoFieldRefs.proposedFix, desiredProposedFix));
-    }
-
-    if (shouldSyncClosedDate && desiredClosedDate && curClosedDate !== normalizeUtcDateTime(desiredClosedDate)) {
-      console.log("[Info] Updating Closed Date:", { from: curClosedDate || "(empty)", to: desiredClosedDate });
-      patchData.push(buildFieldPatchOperation(adoFieldRefs.closedDate, desiredClosedDate));
-    } else if (desiredClosedDate && !shouldSyncClosedDate) {
-      console.log(`[Info] Skipping Closed Date sync because outbound ADO State is '${mappedStatus || "(blank)"}'.`);
     }
 
     if (resolvedReasonLabel && !isResolvedReasonLockedState && curResolvedReason !== resolvedReasonLabel) {
