@@ -240,6 +240,11 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
       return;
     }
 
+    if (adoStatus.toLowerCase() === "new") {
+      console.log(`[Info] qTest status '${qtestStatusLabel || qtestStatusId}' maps to ADO status 'New'. Skipping ADO update by design.`);
+      return;
+    }
+
     const workItemName = requirement.name || "";
     const match = workItemName.match(/^WI(\d+):/);
 
