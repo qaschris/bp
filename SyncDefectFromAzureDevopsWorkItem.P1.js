@@ -196,8 +196,12 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     }
 
     async function resolveOptionalDefectFieldValue(fieldId, rawValue, fieldLabel, defectContext = null) {
-        if (!fieldId || rawValue === undefined || rawValue === null || rawValue === "") {
+        if (!fieldId || rawValue === undefined || rawValue === null) {
             return { value: null, warningDetails: null };
+        }
+
+        if (rawValue === "") {
+            return { value: "", warningDetails: null };
         }
 
         try {

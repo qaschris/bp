@@ -1125,6 +1125,13 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     if (resolvedReasonLabel && !isResolvedReasonLockedState && curResolvedReason !== resolvedReasonLabel) {
       console.log("[Info] Updating Resolved Reason:", { from: curResolvedReason || "(empty)", to: resolvedReasonLabel });
       patchData.push(buildFieldPatchOperation(adoFieldRefs.resolvedReason, resolvedReasonLabel));
+    } else if (
+      !resolvedReasonLabel &&
+      !isResolvedReasonLockedState &&
+      curResolvedReason
+    ) {
+      console.log("[Info] Clearing Resolved Reason in ADO:", { from: curResolvedReason });
+      patchData.push(buildFieldPatchOperation(adoFieldRefs.resolvedReason, ""));
     } else if (resolvedReasonLabel && isResolvedReasonLockedState) {
       console.log(`[Info] Skipping Resolved Reason sync because outbound ADO State is '${mappedStatus || statusLabel || "(blank)"}'.`);
     }
