@@ -1,6 +1,6 @@
 # Requirement And RICEFW Workflow Hardening Plan
 
-Updated: 2026-04-14
+Updated: 2026-04-17
 
 This document is the working plan for bringing the Requirement and
 RICEFW/Feature workflows up to the same standard as the recent Defect workflow
@@ -13,6 +13,9 @@ Files in scope:
 - `SyncRequirementFromAzureDevopsWorkItem.P1.js`
 - `SyncRICEFWFeatureFromAzureDevops.js`
 - `UpdateRequirementStatusInAzureDevops.P1.js`
+- `QueueRequirementMigration.P1.js`
+- `ProcessRequirementMigrationBatch.P1.js`
+- `bp_requirement_migration.js`
 
 Primary goals:
 
@@ -23,35 +26,82 @@ Primary goals:
 - standardize ChatOps warnings and failures
 - correct qTest requirement assignee handling to use active project users only
 - reduce unnecessary qTest writes and module moves
+- move the requirement migration fully into Pulse rules so no standalone
+  runtime/helper dependency remains
+- keep the Pulse migration worker aligned with the finalized Create/Update
+  Requirement update path
 
 ## Current Findings
 
 ### 1. Standard Requirement Sync
 
-`SyncRequirementFromAzureDevopsWorkItem.P1.js` is functionally complete, but it
-still has several structural gaps:
+`SyncRequirementFromAzureDevopsWorkItem.P1.js` is now the best reference
+implementation for the standard Requirement create/update path and should be
+treated as the baseline for any migration-to-rule port. The current script
+already gives us the structure we want to preserve:
 
-- ADO field refs are still hard-coded throughout the script.
+- Pulse constant-based ADO field refs
+- updated-field filtering to prevent unnecessary write loops
+- desired-state assembly before qTest writes
+- dynamic qTest resolution for core constrained fields
+- optional-field warning-and-leave-unchanged handling for:
+  - `Iteration Path`
+  - `Application Name`
+  - `Fit Gap`
+  - `BP Entity`
+- current-vs-desired comparison before update
+- module moves only when the computed parent actually changes
+- deduped warning/failure helpers through ChatOps
+
+Remaining targeted gaps in the live Requirement rule:
+
 - qTest `AssignedTo` is still handled as normalized free text rather than by
-  resolving against active users in the project.
-- Several qTest requirement fields are written as raw values instead of being
-  resolved through the qTest Fields API.
-- The script still rebuilds and sends broad qTest payloads instead of comparing
-  current vs desired state first.
-- The update URL always includes `parentId=${targetModuleId}`, which means the
-  item can be re-parented even when the module does not actually need to change.
-- ChatOps is still older style: mostly failure-oriented, no warning helper, and
-  no dedupe pattern like the one now used in the Defect workflows.
+  resolving against active users in the project
+- Acceptance Criteria is still embedded in the description body only unless we
+  intentionally restore a separate requirement property
+- some of the helper patterns are still duplicated across Requirement and
+  RICEFW rather than shared
 
-Fields currently handled too loosely:
+### 1b. Requirement Migration In Pulse
 
-- `AssignedTo`
-- `Iteration Path`
-- `Application Name`
-- `Fit Gap`
-- `BP Entity`
-- any other constrained requirement property whose value is currently sent
-  directly from ADO to qTest
+The migration path is no longer a standalone-script target. Because the
+customer environment needs the execution to stay inside Pulse, the migration
+should be implemented as two cooperating Pulse rules:
+
+- `QueueRequirementMigration.P1.js`
+- `ProcessRequirementMigrationBatch.P1.js`
+
+Architecture decision:
+
+- the queue rule is the entry point
+- the queue rule either:
+  - queues one explicit qTest requirement id for single-item testing, or
+  - pages through the old qTest root and emits requirement-id batches to the
+    worker rule
+- the worker rule owns the actual migration logic for each existing qTest
+  requirement
+- both rules can re-invoke themselves:
+  - the queue rule recalls itself for the next page
+  - the worker recalls itself with the remaining ids when it nears its run
+    budget
+- helper logic needed by the Pulse actions must live inside those Pulse action
+  files rather than depending on `qtestApiUtils.js`
+
+Worker-rule behaviors that should match the live standard Requirement rule:
+
+- compare current qTest state before writing
+- skip no-op updates
+- include `parentId` only when the target module actually changes
+- warn and leave optional constrained fields unchanged when they cannot be
+  resolved
+- avoid reintroducing fields into the migration payload that the live rule does
+  not currently manage separately
+
+Role of the old standalone script:
+
+- keep `bp_requirement_migration.js` as a local reference/baseline while the
+  Pulse version is being hardened
+- do not treat the standalone script as the deployment target anymore
 
 ### 2. RICEFW / Feature Sync
 
@@ -127,7 +177,8 @@ Recommendation:
 ## Phase 2: Standard Requirement Sync
 
 Refactor `SyncRequirementFromAzureDevopsWorkItem.P1.js` around one desired-state
-model.
+model, and keep the Pulse migration worker aligned to that same update
+structure.
 
 Target structure:
 
@@ -148,6 +199,20 @@ Required behavior changes:
 - treat optional unresolved values as warning-and-skip, not hard failure
 - include `parentId` only when the target module actually changes
 - suppress no-op writes so unchanged ADO updates do not rewrite qTest
+- port the finalized update path into `ProcessRequirementMigrationBatch.P1.js`
+  instead of letting the migration worker invent its own qTest update payload
+
+Migration porting baseline:
+
+- `buildDesiredRequirementState(...)`
+- `buildRequirementProperties(...)`
+- `evaluateRequirementUpdate(...)`
+- `updateRequirement(...)`
+
+Rule-to-migration alignment rule:
+
+- if the standard Requirement rule changes first, mirror that behavior into the
+  Pulse migration worker before using the migration path in production
 
 Fields that should likely move to dynamic qTest resolution:
 
@@ -315,6 +380,48 @@ Status Bridge:
 - `RequirementStatusFieldID`
 - `AzDoTestingStatusFieldRef`
 
+### Migration Runtime Inputs
+
+Keep migration-specific settings out of Pulse constants where possible. The
+Pulse rules should rely on the shared reusable constants already needed by the
+live Requirement integration, then accept one-time migration inputs in the
+kickoff event payload.
+
+Shared constants still used:
+
+- `QTEST_TOKEN`
+- `ManagerURL`
+- `ProjectID`
+- `RequirementParentID`
+- `AZDO_TOKEN`
+- `AzDoProjectURL`
+- the existing Requirement field-id constants
+- the existing ADO requirement field-ref constants
+
+Hardcoded internal trigger names used by the rules:
+
+- `RequirementMigrationQueueEvent`
+- `RequirementMigrationBatchEvent`
+
+Recommended kickoff payload fields:
+
+- `sourceParentId`
+- `targetParentId`
+- `singleRequirementId`
+- `page`
+- `pageSize`
+- `batchSize`
+- `maxRunMs`
+
+Recommended usage:
+
+- provide `sourceParentId` for full-root migration runs
+- omit `targetParentId` when the normal `RequirementParentID` should be used
+- provide `singleRequirementId` only when deliberately testing one qTest
+  requirement
+- use payload overrides only for one-time migration tuning, not as permanent
+  project constants
+
 ## ChatOps And Error Handling Rules
 
 Requirement workflows should follow the same behavior standard now used in the
@@ -349,6 +456,17 @@ For the standard Requirement workflow:
 - update with module move required
 - update with unresolved optional constrained field
 - update with unresolved assignee
+
+For the Pulse migration rules:
+
+- queue a single explicit requirement id for test mode
+- queue a full root-folder page and emit worker batches
+- worker no-op case where a requirement is already in sync
+- worker update case where only the module parent changes
+- worker update case where properties change but parent does not
+- worker continuation case where remaining ids are re-queued to avoid timeout
+- optional constrained field unresolved and left unchanged
+- Pulse worker payload shape remains aligned with the live Requirement rule
 
 For RICEFW / Feature:
 

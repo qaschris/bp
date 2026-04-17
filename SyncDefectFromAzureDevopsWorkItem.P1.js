@@ -250,7 +250,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             severity: normalizeText(constants.AzDoSeverityFieldRef),
             priority: normalizeText(constants.AzDoPriorityFieldRef),
             defectType: normalizeText(constants.AzDoDefectTypeFieldRef),
-            rootCause: normalizeText(constants.AzDoRootCauseFieldRef),
             proposedFix: normalizeText(constants.AzDoProposedFixFieldRef),
             closedDate: normalizeText(constants.AzDoClosedDateFieldRef),
             targetDate: normalizeText(constants.AzDoTargetDateFieldRef),
@@ -274,7 +273,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             "DefectPriorityFieldID",
             "DefectTypeFieldID",
             "DefectStatusFieldID",
-            "DefectRootCauseFieldID",
             "DefectExternalReferenceFieldID",
             "DefectResolvedReasonFieldID",
             "DefectAssignedToFieldID",
@@ -302,7 +300,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             "severity",
             "priority",
             "defectType",
-            "rootCause",
             "proposedFix",
             "closedDate",
             "targetDate",
@@ -701,7 +698,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         iterationPathValue,
         severityValue,
         priorityValue,
-        rootCauseValue,
         defectTypeValue,
         statusValue,
         proposedFixValue,
@@ -797,15 +793,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
                 field_id: constants.DefectPriorityFieldID,
                 field_value: parseInt(priorityValue, 10),
             });
-        }
-
-        if (constants.DefectRootCauseFieldID && rootCauseValue !== null && rootCauseValue !== undefined && rootCauseValue !== "") {
-            const parsedRootCauseValue = parseInt(rootCauseValue, 10);
-            requestBody.properties.push({
-                field_id: constants.DefectRootCauseFieldID,
-                field_value: Number.isNaN(parsedRootCauseValue) ? rootCauseValue : parsedRootCauseValue,
-            });
-            console.log(`[Info] Added Root Cause '${rootCauseValue}' to qTest update payload.`);
         }
 
         if (defectTypeValue) {
@@ -1186,31 +1173,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         console.log(`[Warn] ADO State '${adoState}' does not match any defined qTest status.`);
     }
 
-    const adoRootCauseRaw = adoFieldRefs.rootCause ? fields?.[adoFieldRefs.rootCause] : "";
-    const adoRootCauseFormatted = adoFieldRefs.rootCause
-        ? fields?.[`${adoFieldRefs.rootCause}@OData.Community.Display.V1.FormattedValue`]
-        : "";
-    const adoRootCause = getAdoFieldValue(fields, adoFieldRefs.rootCause, { preferFormatted: true });
-    console.log(`[Debug] ADO Root Cause diagnostics: ${safeJson({
-        fieldRef: adoFieldRefs.rootCause,
-        raw: adoRootCauseRaw,
-        formatted: adoRootCauseFormatted,
-        selected: adoRootCause,
-    })}`);
-
-    const qtestRootCauseResult = await resolveOptionalDefectFieldValue(
-        constants.DefectRootCauseFieldID,
-        adoRootCause,
-        "Root Cause",
-        defectContext
-    );
-    const qtestRootCauseValue = qtestRootCauseResult.value;
-    if (qtestRootCauseValue) {
-        console.log(`[Info] Mapped ADO Root Cause '${adoRootCause}' to qTest Root Cause value '${qtestRootCauseValue}'`);
-    } else if (adoRootCause) {
-        console.log(`[Warn] ADO Root Cause '${adoRootCause}' could not be mapped to qTest. Root Cause update will be skipped.`);
-    }
-
     const adoProposedFix = getAdoFieldValue(fields, adoFieldRefs.proposedFix);
     console.log(`[Info] ADO Proposed Fix value length: ${adoProposedFix.length}`);
 
@@ -1396,7 +1358,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             qtestIterationPathValue,
             qtestSeverityValue,
             qtestPriorityValue,
-            qtestRootCauseValue,
             qtestDefectTypeValue,
             qtestStatusValue,
             qtestProposedFixValue,
@@ -1421,10 +1382,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
             if (assignedToTeamWarningDetails) {
                 emitFriendlyWarning(assignedToTeamWarningDetails);
-            }
-
-            if (qtestRootCauseResult.warningDetails) {
-                emitFriendlyWarning(qtestRootCauseResult.warningDetails);
             }
 
             if (affectedReleaseWarningDetails) {

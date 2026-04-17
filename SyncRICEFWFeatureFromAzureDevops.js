@@ -83,6 +83,33 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         }
     }
 
+    function getRequirementTestingStatusFieldId() {
+        return firstNonEmpty(
+            normalizeText(constants.RequirementStatusFieldID),
+            normalizeText(constants.RequirementTestingStatusFieldID)
+        );
+    }
+
+    function pushConfiguredTextProperty(properties, fieldId, fieldValue) {
+        if (!normalizeText(fieldId)) return;
+
+        properties.push({
+            field_id: fieldId,
+            field_value: fieldValue === undefined || fieldValue === null ? "" : fieldValue,
+        });
+    }
+
+    function pushConfiguredResolvedProperty(properties, fieldId, fieldValue) {
+        if (!normalizeText(fieldId) || fieldValue === undefined || fieldValue === null || fieldValue === "") {
+            return;
+        }
+
+        properties.push({
+            field_id: fieldId,
+            field_value: fieldValue,
+        });
+    }
+
     function markFriendlyFailure(error) {
         if (error && typeof error === "object") {
             error.__friendlyFailureEmitted = true;
@@ -308,14 +335,13 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             "RequirementWorkItemTypeFieldID",
             "RequirementAssignedToFieldID",
             "RequirementIterationPathFieldID",
-            "RequirementStateFieldID",
-            "RequirementReasonFieldID",
-            "RequirementAcceptanceCriteriaFieldID",
-            "RequirementPlainDescriptionFieldID",
             "RequirementRICEFWConfigurationFieldID",
-            "RequirementStatusFieldID",
             "FeatureParentID",
         ].filter(name => !normalizeText(constants[name]));
+
+        if (!getRequirementTestingStatusFieldId()) {
+            missingQtestConstants.push("RequirementStatusFieldID");
+        }
 
         if (missingQtestConstants.length) {
             emitFriendlyFailure({
@@ -720,12 +746,12 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             { field_id: constants.RequirementDescriptionFieldID, field_value: desiredState.description },
             { field_id: constants.RequirementStreamSquadFieldID, field_value: desiredState.areaPath },
             { field_id: constants.RequirementWorkItemTypeFieldID, field_value: desiredState.workItemTypeValue },
-            { field_id: constants.RequirementStateFieldID, field_value: desiredState.stateValue || "" },
-            { field_id: constants.RequirementReasonFieldID, field_value: desiredState.reasonValue || "" },
-            { field_id: constants.RequirementAcceptanceCriteriaFieldID, field_value: desiredState.acceptanceCriteriaValue || "" },
-            { field_id: constants.RequirementPlainDescriptionFieldID, field_value: desiredState.plainDescriptionValue || "" },
             { field_id: constants.RequirementAssignedToFieldID, field_value: desiredState.assignedToText || "" },
         ];
+
+        pushConfiguredResolvedProperty(properties, constants.RequirementStateFieldID, desiredState.stateValue);
+        pushConfiguredResolvedProperty(properties, constants.RequirementReasonFieldID, desiredState.reasonValue);
+        pushConfiguredTextProperty(properties, constants.RequirementAcceptanceCriteriaFieldID, desiredState.acceptanceCriteriaValue || "");
 
         if (normalizeText(constants.RequirementComplexityFieldID) && desiredState.complexityValue) {
             properties.push({ field_id: constants.RequirementComplexityFieldID, field_value: desiredState.complexityValue });
@@ -742,9 +768,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         if (desiredState.ricefwConfigurationValue) {
             properties.push({ field_id: constants.RequirementRICEFWConfigurationFieldID, field_value: desiredState.ricefwConfigurationValue });
         }
-        if (desiredState.testingStatusValue) {
-            properties.push({ field_id: constants.RequirementStatusFieldID, field_value: desiredState.testingStatusValue });
-        }
+        pushConfiguredResolvedProperty(properties, getRequirementTestingStatusFieldId(), desiredState.testingStatusValue);
 
         return properties;
     }
@@ -812,7 +836,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
         const ricefwConfigurationResolution = await resolveOptionalRequirementFieldValue(constants.RequirementRICEFWConfigurationFieldID, getAdoFieldValue(fields, adoFieldRefs.ricefwConfiguration), "RICEFW Configuration", requirementContext);
         if (ricefwConfigurationResolution.warningDetails) warnings.push(ricefwConfigurationResolution.warningDetails);
-        const testingStatusResolution = await resolveOptionalRequirementFieldValue(constants.RequirementStatusFieldID, getAdoFieldValue(fields, adoFieldRefs.testingStatus), "Testing Status", requirementContext);
+        const testingStatusResolution = await resolveOptionalRequirementFieldValue(getRequirementTestingStatusFieldId(), getAdoFieldValue(fields, adoFieldRefs.testingStatus), "Testing Status", requirementContext);
         if (testingStatusResolution.warningDetails) warnings.push(testingStatusResolution.warningDetails);
         const stateResolution = await resolveOptionalRequirementFieldValue(constants.RequirementStateFieldID, getAdoFieldValue(fields, adoFieldRefs.state), "State", requirementContext);
         if (stateResolution.warningDetails) warnings.push(stateResolution.warningDetails);
@@ -833,7 +857,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             stateValue: stateResolution.value,
             reasonValue: reasonResolution.value,
             acceptanceCriteriaValue: getAdoFieldValue(fields, adoFieldRefs.acceptanceCriteria) || "",
-            plainDescriptionValue: getAdoFieldValue(fields, adoFieldRefs.description) || "",
             ricefwConfigurationValue: ricefwConfigurationResolution.value,
             testingStatusValue: testingStatusResolution.value,
             targetModuleId: await ensureModulePath(constants.FeatureParentID, adoAreaPath, adoIterationPath),

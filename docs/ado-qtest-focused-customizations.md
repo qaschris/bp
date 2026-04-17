@@ -249,44 +249,50 @@ Bring pre-existing qTest requirements forward into the new module and metadata s
 
 **Direction / Event**
 
-- Standalone utility
-- Not webhook-driven
+- qTest Pulse migration workflow
+- Triggered manually or by internal Pulse webhook chaining
 
 **What Changed from Stock**
 
-- Added a dedicated batch migration script for already-existing qTest requirements
+- Added a dedicated Pulse queue rule for already-existing qTest requirements
+- Added a dedicated Pulse worker rule that updates batches of existing qTest requirements
 - Reads the linked Azure DevOps work item for each qTest requirement
 - Recomputes the target qTest module path using the same rules as the live integration
-- Supports `TEST_MODE` and `DRY_RUN` for controlled validation before production execution
-- Updated to use dynamic qTest field-value resolution for constrained fields
+- Uses internal trigger chaining so the queue rule can page through the old root folder and the worker can recall itself with remaining ids when needed
+- Retains single-requirement test mode by allowing the queue rule to emit one explicit qTest requirement id
+- Uses dynamic qTest field-value resolution for constrained fields
 
 **Pre-Requisites**
 
-- qTest and ADO tokens populated in the script
-- `QTEST_PROJECT_ID`, `PARENT_MODULE_ID`, and field IDs populated
+- qTest and ADO Pulse constants populated
+- Internal Pulse triggers created for the queue rule and the worker rule
+- qTest migration source parent/root supplied in the kickoff payload for full-root runs
+- target parent may be supplied in the kickoff payload, but normally reuses `RequirementParentID`
 - Existing qTest requirements already use the `WI<id>:` naming convention
-- Dry run reviewed before live execution
+- Single-requirement test path validated before full-root execution
 
 **Primary Files**
 
-- `bp_requirement_migration.js`
+- `QueueRequirementMigration.P1.js`
+- `ProcessRequirementMigrationBatch.P1.js`
+- `bp_requirement_migration.js` as the local reference baseline
 
 **Representative Code Snippet**
 
 ```js
-const targetModuleId = await ensureModulePath(areaPath, iterationPath);
+await emitEvent("RequirementMigrationBatchEvent", {
+    runId,
+    requirementIds: batchIds,
+    targetParentId,
+});
 
-const payload = {
-    name,
-    properties: buildRequirementProperties({
-        description,
-        areaPath,
-        complexityValue: mappedValues.qtestComplexityValue,
-        workItemTypeValue: mappedValues.qtestWorkItemTypeValue,
-    }),
-};
-
-await updateRequirement(requirement, payload, targetModuleId);
+if (remainingIds.length) {
+    await emitEvent("RequirementMigrationBatchEvent", {
+        runId,
+        requirementIds: remainingIds,
+        continuationCount: continuationCount + 1,
+    });
+}
 ```
 
 ## Current Production-Readiness Notes
@@ -304,4 +310,6 @@ await updateRequirement(requirement, payload, targetModuleId);
 - Requirement sync from ADO to qTest: `SyncRequirementFromAzureDevopsWorkItem.P1.js`
 - RICEFW feature sync from ADO to qTest: `SyncRICEFWFeatureFromAzureDevops.js`
 - Requirement status sync from qTest to ADO: `UpdateRequirementStatusInAzureDevops.P1.js`
-- Existing requirement migration utility: `bp_requirement_migration.js`
+- Requirement migration queue: `QueueRequirementMigration.P1.js`
+- Requirement migration worker: `ProcessRequirementMigrationBatch.P1.js`
+- Existing requirement migration reference script: `bp_requirement_migration.js`

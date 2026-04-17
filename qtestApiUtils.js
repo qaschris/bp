@@ -22,9 +22,10 @@ function normalizeFieldResponse(data) {
     return [];
 }
 
-function getAllowedValues(fieldDefinition) {
+function getAllowedValues(fieldDefinition, options = {}) {
+    const includeInactive = options.includeInactive === true;
     return Array.isArray(fieldDefinition?.allowed_values)
-        ? fieldDefinition.allowed_values.filter(v => v?.is_active !== false)
+        ? fieldDefinition.allowed_values.filter(v => includeInactive || v?.is_active !== false)
         : [];
 }
 
@@ -77,6 +78,7 @@ async function resolveFieldValue({
     objectType,
     fieldId,
     rawValue,
+    includeInactive,
     headers,
     cache,
     logger,
@@ -103,7 +105,7 @@ async function resolveFieldValue({
         return rawValue;
     }
 
-    const allowedValues = getAllowedValues(fieldDefinition);
+    const allowedValues = getAllowedValues(fieldDefinition, { includeInactive });
     const normalizedRawValue = normalizeLabel(rawValue);
 
     const exactValueMatch = allowedValues.find(option => String(option?.value) === String(rawValue));

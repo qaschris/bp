@@ -1061,6 +1061,8 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
     console.log("curTargetDate", curTargetDate);
     console.log("newTargetDate", desiredTargetDate, isoDate);
+    console.log("[Info] Current ADO Resolved Reason:", curResolvedReason || "(empty)");
+    console.log("[Info] Desired qTest Resolved Reason:", resolvedReasonLabel || "(empty)");
 
     const patchData = [];
 
@@ -1134,6 +1136,8 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
       patchData.push(buildFieldPatchOperation(adoFieldRefs.resolvedReason, ""));
     } else if (resolvedReasonLabel && isResolvedReasonLockedState) {
       console.log(`[Info] Skipping Resolved Reason sync because outbound ADO State is '${mappedStatus || statusLabel || "(blank)"}'.`);
+    } else if (!resolvedReasonLabel && !isResolvedReasonLockedState) {
+      console.log("[Info] Resolved Reason is blank in qTest and already blank in ADO. No Resolved Reason patch needed.");
     }
 
     if (adoFieldRefs.application && appLabel && curApp !== appLabel) {

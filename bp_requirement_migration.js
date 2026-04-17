@@ -110,6 +110,39 @@ function logError(message, payload) {
     }
 }
 
+function logWarning(message, payload) {
+    const timestamp = new Date().toISOString();
+    const line = `[${timestamp}] [WARN] ${message}`;
+    console.warn(line);
+    appendFile(STATE.logFile, line);
+
+    if (payload !== undefined) {
+        const rendered = redactSecrets(typeof payload === 'string' ? payload : safeJson(payload));
+        console.warn(rendered);
+        appendFile(STATE.logFile, rendered);
+    }
+}
+
+function normalizeText(value) {
+    return value == null
+        ? ''
+        : String(value)
+            .normalize('NFKC')
+            .replace(/[\u200B-\u200D\uFEFF]/g, '')
+            .replace(/<0x(?:200b|200c|200d|feff)>/gi, '')
+            .trim();
+}
+
+function firstNonEmpty(...values) {
+    for (const value of values) {
+        if (value !== undefined && value !== null && value !== '') {
+            return value;
+        }
+    }
+
+    return '';
+}
+
 function validateConfig() {
     const required = [
         'QTEST_TOKEN',
@@ -183,7 +216,7 @@ function adoHeaders() {
     };
 }
 
-async function resolveRequirementFieldValue(fieldId, rawValue, fieldLabel) {
+async function resolveRequirementFieldValue(fieldId, rawValue, fieldLabel, options = {}) {
     if (!fieldId || rawValue === undefined || rawValue === null || rawValue === '') {
         return null;
     }
@@ -195,18 +228,44 @@ async function resolveRequirementFieldValue(fieldId, rawValue, fieldLabel) {
             objectType: 'requirements',
             fieldId,
             rawValue,
+            includeInactive: options.includeInactive === true,
             headers: qTestHeaders(),
             cache: STATE.qtestMetadataCache,
             logger: message => log('INFO', message),
         });
     } catch (error) {
-        logError(`Unable to resolve qTest option value for '${fieldLabel}'.`, {
-            fieldId,
-            fieldLabel,
-            rawValue,
-            error: error.message,
-        });
+        if (options.emitFailure !== false) {
+            logError(`Unable to resolve qTest option value for '${fieldLabel}'.`, {
+                fieldId,
+                fieldLabel,
+                rawValue,
+                error: error.message,
+            });
+        }
         throw error;
+    }
+}
+
+async function resolveOptionalRequirementFieldValue(fieldId, rawValue, fieldLabel) {
+    if (!fieldId || rawValue === undefined || rawValue === null || rawValue === '') {
+        return { value: null, warning: null };
+    }
+
+    try {
+        const value = await resolveRequirementFieldValue(fieldId, rawValue, fieldLabel, {
+            includeInactive: true,
+            emitFailure: false,
+        });
+        return { value, warning: null };
+    } catch (error) {
+        return {
+            value: null,
+            warning: {
+                fieldName: fieldLabel,
+                fieldValue: rawValue,
+                detail: `${error.message} The field will be left unchanged.`,
+            },
+        };
     }
 }
 
@@ -328,141 +387,301 @@ function extractWorkItemIdFromRequirement(requirement) {
     return match ? Number(match[1]) : null;
 }
 
-async function getMappedValues(workItem) {
-    const fields = extractFieldsFromAdoWorkItem(workItem);
-    const complexity = fields['Custom.Complexity'] || null;
-    const workItemType = fields['System.WorkItemType'] || null;
-    const priority = fields['Microsoft.VSTS.Common.Priority'];
-    const category = fields['Custom.RequirementCategory'] || null;
-
+function buildOptionalFieldConfigWarning(fieldKey, sourceLabel, rawValue) {
     return {
-        qtestComplexityValue: await resolveRequirementFieldValue(
-            CONFIG.FIELD_IDS.REQUIREMENT_COMPLEXITY,
-            complexity,
-            'Complexity'
-        ),
-        qtestWorkItemTypeValue: await resolveRequirementFieldValue(
-            CONFIG.FIELD_IDS.REQUIREMENT_WORK_ITEM_TYPE,
-            workItemType,
-            'Work Item Type'
-        ),
-        qtestPriorityValue: await resolveRequirementFieldValue(
-            CONFIG.FIELD_IDS.REQUIREMENT_PRIORITY,
-            priority,
-            'Priority'
-        ),
-        qtestTypeValue: await resolveRequirementFieldValue(
-            CONFIG.FIELD_IDS.REQUIREMENT_TYPE,
-            category,
-            'Requirement Category'
-        ),
+        fieldName: `CONFIG.FIELD_IDS.${fieldKey}`,
+        fieldValue: rawValue,
+        detail: `${sourceLabel} has a source value but the qTest field id is not configured. The field will be left unchanged.`,
     };
 }
 
-function buildRequirementProperties({
-    description,
-    acceptanceCriteria,
-    areaPath,
-    complexityValue,
-    workItemTypeValue,
-    priorityValue,
-    typeValue,
-    assignedTo,
-    iterationPath,
-    applicationName,
-    fitGap,
-    bpEntity,
-}) {
+function buildRequirementProperties(desiredState) {
     const properties = [];
 
     if (CONFIG.FIELD_IDS.REQUIREMENT_DESCRIPTION) {
         properties.push({
             field_id: CONFIG.FIELD_IDS.REQUIREMENT_DESCRIPTION,
-            field_value: description,
+            field_value: desiredState.description,
         });
     }
 
-    if (CONFIG.FIELD_IDS.REQUIREMENT_STREAM_SQUAD && areaPath) {
+    if (CONFIG.FIELD_IDS.REQUIREMENT_STREAM_SQUAD) {
         properties.push({
             field_id: CONFIG.FIELD_IDS.REQUIREMENT_STREAM_SQUAD,
-            field_value: areaPath,
+            field_value: desiredState.areaPath,
         });
     }
 
-    if (CONFIG.FIELD_IDS.REQUIREMENT_COMPLEXITY && complexityValue) {
+    if (CONFIG.FIELD_IDS.REQUIREMENT_COMPLEXITY && desiredState.complexityValue) {
         properties.push({
             field_id: CONFIG.FIELD_IDS.REQUIREMENT_COMPLEXITY,
-            field_value: complexityValue,
+            field_value: desiredState.complexityValue,
         });
     }
 
-    if (CONFIG.FIELD_IDS.REQUIREMENT_WORK_ITEM_TYPE && workItemTypeValue) {
+    if (CONFIG.FIELD_IDS.REQUIREMENT_WORK_ITEM_TYPE && desiredState.workItemTypeValue) {
         properties.push({
             field_id: CONFIG.FIELD_IDS.REQUIREMENT_WORK_ITEM_TYPE,
-            field_value: workItemTypeValue,
+            field_value: desiredState.workItemTypeValue,
         });
     }
 
-    if (CONFIG.FIELD_IDS.REQUIREMENT_PRIORITY && priorityValue) {
+    if (CONFIG.FIELD_IDS.REQUIREMENT_PRIORITY && desiredState.priorityValue) {
         properties.push({
             field_id: CONFIG.FIELD_IDS.REQUIREMENT_PRIORITY,
-            field_value: priorityValue,
+            field_value: desiredState.priorityValue,
         });
     }
 
-    if (CONFIG.FIELD_IDS.REQUIREMENT_TYPE && typeValue) {
+    if (CONFIG.FIELD_IDS.REQUIREMENT_TYPE && desiredState.typeValue) {
         properties.push({
             field_id: CONFIG.FIELD_IDS.REQUIREMENT_TYPE,
-            field_value: typeValue,
+            field_value: desiredState.typeValue,
         });
     }
 
-    if (CONFIG.FIELD_IDS.REQUIREMENT_ASSIGNED_TO && assignedTo) {
-        const normalizedAssignedTo = normalizeAssignedTo(assignedTo);
-        if (normalizedAssignedTo) {
-            properties.push({
-                field_id: CONFIG.FIELD_IDS.REQUIREMENT_ASSIGNED_TO,
-                field_value: normalizedAssignedTo,
-            });
-        }
+    if (CONFIG.FIELD_IDS.REQUIREMENT_ASSIGNED_TO) {
+        properties.push({
+            field_id: CONFIG.FIELD_IDS.REQUIREMENT_ASSIGNED_TO,
+            field_value: desiredState.assignedToText || '',
+        });
     }
 
-    if (CONFIG.FIELD_IDS.REQUIREMENT_ITERATION_PATH && iterationPath) {
+    if (CONFIG.FIELD_IDS.REQUIREMENT_ITERATION_PATH && desiredState.iterationPathValue) {
         properties.push({
             field_id: CONFIG.FIELD_IDS.REQUIREMENT_ITERATION_PATH,
-            field_value: iterationPath,
+            field_value: desiredState.iterationPathValue,
         });
     }
 
-    if (CONFIG.FIELD_IDS.REQUIREMENT_APPLICATION_NAME && applicationName) {
+    if (CONFIG.FIELD_IDS.REQUIREMENT_APPLICATION_NAME && desiredState.applicationNameValue) {
         properties.push({
             field_id: CONFIG.FIELD_IDS.REQUIREMENT_APPLICATION_NAME,
-            field_value: applicationName,
+            field_value: desiredState.applicationNameValue,
         });
     }
 
-    if (CONFIG.FIELD_IDS.REQUIREMENT_FIT_GAP && fitGap !== null && fitGap !== undefined) {
+    if (CONFIG.FIELD_IDS.REQUIREMENT_FIT_GAP && desiredState.fitGapValue !== null && desiredState.fitGapValue !== undefined) {
         properties.push({
             field_id: CONFIG.FIELD_IDS.REQUIREMENT_FIT_GAP,
-            field_value: fitGap,
+            field_value: desiredState.fitGapValue,
         });
     }
 
-    if (CONFIG.FIELD_IDS.REQUIREMENT_BP_ENTITY && bpEntity !== null && bpEntity !== undefined) {
+    if (CONFIG.FIELD_IDS.REQUIREMENT_BP_ENTITY && desiredState.bpEntityValue !== null && desiredState.bpEntityValue !== undefined) {
         properties.push({
             field_id: CONFIG.FIELD_IDS.REQUIREMENT_BP_ENTITY,
-            field_value: bpEntity,
-        });
-    }
-
-    if (CONFIG.FIELD_IDS.REQUIREMENT_ACCEPTANCE_CRITERIA && acceptanceCriteria) {
-        properties.push({
-            field_id: CONFIG.FIELD_IDS.REQUIREMENT_ACCEPTANCE_CRITERIA,
-            field_value: acceptanceCriteria,
+            field_value: desiredState.bpEntityValue,
         });
     }
 
     return properties;
+}
+
+function getPropertyById(requirement, fieldId) {
+    const properties = Array.isArray(requirement?.properties) ? requirement.properties : [];
+    return properties.find(property => String(property?.field_id) === String(fieldId)) || null;
+}
+
+function getRequirementParentId(requirement) {
+    return firstNonEmpty(
+        requirement?.parent_id,
+        requirement?.parentId,
+        requirement?.parent?.id,
+        requirement?.module_id,
+        requirement?.moduleId
+    );
+}
+
+function valuesEqual(left, right) {
+    const normalizeValue = value => {
+        if (value === undefined || value === null || value === '') return '';
+        return normalizeText(value).replace(/\s+/g, ' ');
+    };
+
+    return normalizeValue(left) === normalizeValue(right);
+}
+
+function evaluateRequirementUpdate(requirementDetails, desiredState) {
+    const desiredProperties = buildRequirementProperties(desiredState);
+    const requestBody = { name: desiredState.name, properties: desiredProperties };
+    const changedFields = [];
+
+    if (!valuesEqual(requirementDetails?.name, desiredState.name)) {
+        changedFields.push('name');
+    }
+
+    for (const property of desiredProperties) {
+        const currentProperty = getPropertyById(requirementDetails, property.field_id);
+        const currentValue = firstNonEmpty(currentProperty?.field_value, currentProperty?.field_value_name);
+        if (!valuesEqual(currentValue, property.field_value)) {
+            changedFields.push(`field:${property.field_id}`);
+        }
+    }
+
+    const currentParentId = getRequirementParentId(requirementDetails);
+    const parentChanged = desiredState.targetModuleId &&
+        String(currentParentId || '') !== String(desiredState.targetModuleId || '');
+    if (parentChanged) {
+        changedFields.push('parentId');
+    }
+
+    return {
+        needsUpdate: changedFields.length > 0,
+        changedFields,
+        parentChanged,
+        requestBody,
+    };
+}
+
+function emitWarnings(warnings, requirementId, workItemId) {
+    for (const warning of warnings || []) {
+        if (!warning) continue;
+        logWarning(
+            `Optional requirement field '${warning.fieldName}' was left unchanged for qTest requirement '${requirementId}' from ADO work item '${workItemId}'.`,
+            warning
+        );
+    }
+}
+
+async function buildDesiredRequirementState(workItemId, workItem) {
+    const fields = extractFieldsFromAdoWorkItem(workItem);
+    const warnings = [];
+    const adoAreaPath = fields['System.AreaPath'] || '';
+    const adoIterationPath = fields['System.IterationPath'] || '';
+    const adoComplexity = fields['Custom.Complexity'] || '';
+    const adoWorkItemType = fields['System.WorkItemType'] || '';
+    const adoPriority = fields['Microsoft.VSTS.Common.Priority'];
+    const adoRequirementCategory = fields['Custom.RequirementCategory'] || '';
+    const adoApplicationName = fields['Custom.ApplicationName'] || '';
+    const adoFitGap = fields['BP.ERP.FitGap'];
+    const adoEntity = fields['Custom.Entity'];
+    const adoAssignedTo = firstNonEmpty(fields['System.AssignedTo']);
+
+    log('INFO', `Building desired state for work item '${workItemId}'.`, {
+        title: fields['System.Title'] || '',
+        areaPath: adoAreaPath,
+        iterationPath: adoIterationPath,
+        complexity: adoComplexity,
+        workItemType: adoWorkItemType,
+        priority: adoPriority,
+        requirementCategory: adoRequirementCategory,
+        applicationName: adoApplicationName,
+        fitGap: adoFitGap,
+        bpEntity: adoEntity,
+        assignedTo: adoAssignedTo,
+    });
+
+    const complexityValue = await resolveRequirementFieldValue(
+        CONFIG.FIELD_IDS.REQUIREMENT_COMPLEXITY,
+        adoComplexity,
+        'Complexity'
+    );
+    const workItemTypeValue = await resolveRequirementFieldValue(
+        CONFIG.FIELD_IDS.REQUIREMENT_WORK_ITEM_TYPE,
+        adoWorkItemType,
+        'Work Item Type'
+    );
+    const priorityValue = await resolveRequirementFieldValue(
+        CONFIG.FIELD_IDS.REQUIREMENT_PRIORITY,
+        adoPriority,
+        'Priority'
+    );
+    const typeValue = await resolveRequirementFieldValue(
+        CONFIG.FIELD_IDS.REQUIREMENT_TYPE,
+        adoRequirementCategory,
+        'Requirement Category'
+    );
+
+    const iterationResolution = await resolveOptionalRequirementFieldValue(
+        CONFIG.FIELD_IDS.REQUIREMENT_ITERATION_PATH,
+        adoIterationPath,
+        'Iteration Path'
+    );
+    if (iterationResolution.warning) {
+        warnings.push(iterationResolution.warning);
+    }
+
+    let applicationNameValue = null;
+    if (adoApplicationName) {
+        if (!CONFIG.FIELD_IDS.REQUIREMENT_APPLICATION_NAME) {
+            warnings.push(buildOptionalFieldConfigWarning(
+                'REQUIREMENT_APPLICATION_NAME',
+                'Application Name',
+                adoApplicationName
+            ));
+        } else {
+            const resolution = await resolveOptionalRequirementFieldValue(
+                CONFIG.FIELD_IDS.REQUIREMENT_APPLICATION_NAME,
+                adoApplicationName,
+                'Application Name'
+            );
+            applicationNameValue = resolution.value;
+            if (resolution.warning) {
+                warnings.push(resolution.warning);
+            }
+        }
+    }
+
+    let fitGapValue = null;
+    if (adoFitGap !== undefined && adoFitGap !== null && adoFitGap !== '') {
+        if (!CONFIG.FIELD_IDS.REQUIREMENT_FIT_GAP) {
+            warnings.push(buildOptionalFieldConfigWarning(
+                'REQUIREMENT_FIT_GAP',
+                'Fit Gap',
+                adoFitGap
+            ));
+        } else {
+            const resolution = await resolveOptionalRequirementFieldValue(
+                CONFIG.FIELD_IDS.REQUIREMENT_FIT_GAP,
+                adoFitGap,
+                'Fit Gap'
+            );
+            fitGapValue = resolution.value;
+            if (resolution.warning) {
+                warnings.push(resolution.warning);
+            }
+        }
+    }
+
+    let bpEntityValue = null;
+    if (adoEntity !== undefined && adoEntity !== null && adoEntity !== '') {
+        if (!CONFIG.FIELD_IDS.REQUIREMENT_BP_ENTITY) {
+            warnings.push(buildOptionalFieldConfigWarning(
+                'REQUIREMENT_BP_ENTITY',
+                'BP Entity',
+                adoEntity
+            ));
+        } else {
+            const resolution = await resolveOptionalRequirementFieldValue(
+                CONFIG.FIELD_IDS.REQUIREMENT_BP_ENTITY,
+                adoEntity,
+                'BP Entity'
+            );
+            bpEntityValue = resolution.value;
+            if (resolution.warning) {
+                warnings.push(resolution.warning);
+            }
+        }
+    }
+
+    return {
+        workItemId,
+        name: buildRequirementName(workItemId, workItem),
+        description: buildRequirementDescription(workItem),
+        areaPath: adoAreaPath,
+        complexityValue,
+        workItemTypeValue,
+        priorityValue,
+        typeValue,
+        assignedToText: normalizeAssignedTo(adoAssignedTo),
+        iterationPathValue: iterationResolution.value,
+        applicationNameValue,
+        fitGapValue,
+        bpEntityValue,
+        targetModuleId: await ensureModulePath(adoAreaPath, adoIterationPath),
+        warnings,
+    };
 }
 
 async function getSubModules(parentId) {
@@ -584,16 +803,32 @@ async function fetchAdoWorkItem(workItemId) {
     return adoGet(url, { 'api-version': '7.1-preview.3' });
 }
 
-async function updateRequirement(requirement, payload, targetModuleId) {
-    const url = `${CONFIG.QTEST_BASE_URL}/api/v3/projects/${CONFIG.QTEST_PROJECT_ID}/requirements/${requirement.id}`;
-    const params = { parentId: targetModuleId };
-
-    if (CONFIG.DRY_RUN) {
-        log('INFO', `[DRY RUN] Would update requirement '${requirement.id}' in target module '${targetModuleId}'.`, payload);
-        return;
+async function updateRequirement(requirementDetails, desiredState, evaluation) {
+    if (!evaluation.needsUpdate) {
+        log('INFO', `Requirement '${requirementDetails.id}' is already in sync. Skipping update.`, {
+            changedFields: evaluation.changedFields,
+        });
+        emitWarnings(desiredState.warnings, requirementDetails.id, desiredState.workItemId);
+        return requirementDetails;
     }
 
-    await qtestPut(url, payload, params);
+    const url = `${CONFIG.QTEST_BASE_URL}/api/v3/projects/${CONFIG.QTEST_PROJECT_ID}/requirements/${requirementDetails.id}`;
+    const params = evaluation.parentChanged ? { parentId: desiredState.targetModuleId } : undefined;
+
+    if (CONFIG.DRY_RUN) {
+        log('INFO', `[DRY RUN] Would update requirement '${requirementDetails.id}'.`, {
+            changedFields: evaluation.changedFields,
+            parentChanged: evaluation.parentChanged,
+            params,
+            payload: evaluation.requestBody,
+        });
+        emitWarnings(desiredState.warnings, requirementDetails.id, desiredState.workItemId);
+        return requirementDetails;
+    }
+
+    const updated = await qtestPut(url, evaluation.requestBody, params);
+    emitWarnings(desiredState.warnings, requirementDetails.id, desiredState.workItemId);
+    return updated || requirementDetails;
 }
 
 async function processRequirement(requirement) {
@@ -613,39 +848,23 @@ async function processRequirement(requirement) {
 
     try {
         const workItem = await fetchAdoWorkItem(workItemId);
-        const fields = extractFieldsFromAdoWorkItem(workItem);
-        const description = buildRequirementDescription(workItem);
-        const name = buildRequirementName(workItemId, workItem);
-        const mappedValues = await getMappedValues(workItem);
-        const areaPath = fields['System.AreaPath'] || '';
-        const iterationPath = fields['System.IterationPath'] || null;
-        const applicationName = fields['Custom.ApplicationName'] || null;
-        const fitGap = fields['BP.ERP.FitGap'] ?? null;
-        const bpEntity = fields['Custom.Entity'] ?? null;
-        const acceptanceCriteria = fields['Microsoft.VSTS.Common.AcceptanceCriteria'] || '';
-        const targetModuleId = await ensureModulePath(areaPath, iterationPath);
+        const requirementDetails = await fetchRequirementById(requirementId);
+        const desiredState = await buildDesiredRequirementState(workItemId, workItem);
+        const evaluation = evaluateRequirementUpdate(requirementDetails, desiredState);
 
-        const payload = {
-            name,
-            properties: buildRequirementProperties({
-                description,
-                acceptanceCriteria,
-                areaPath,
-                complexityValue: mappedValues.qtestComplexityValue,
-                workItemTypeValue: mappedValues.qtestWorkItemTypeValue,
-                priorityValue: mappedValues.qtestPriorityValue,
-                typeValue: mappedValues.qtestTypeValue,
-                assignedTo: fields['System.AssignedTo'],
-                iterationPath,
-                applicationName,
-                fitGap,
-                bpEntity,
-            }),
-        };
+        await updateRequirement(requirementDetails, desiredState, evaluation);
 
-        await updateRequirement(requirement, payload, targetModuleId);
-        STATE.counters.updated += 1;
-        log('INFO', `Completed requirement '${requirementId}' using ADO work item '${workItemId}'.`);
+        if (evaluation.needsUpdate) {
+            STATE.counters.updated += 1;
+        } else {
+            STATE.counters.skipped += 1;
+        }
+
+        log('INFO', `Completed requirement '${requirementId}' using ADO work item '${workItemId}'.`, {
+            changedFields: evaluation.changedFields,
+            updated: evaluation.needsUpdate,
+            parentChanged: evaluation.parentChanged,
+        });
     } catch (error) {
         STATE.counters.failed += 1;
         logError(`Failed processing requirement '${requirementId}'.`, {
