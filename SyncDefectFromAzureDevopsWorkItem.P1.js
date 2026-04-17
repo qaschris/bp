@@ -854,15 +854,22 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             console.log(`[Info] No Closed Date provided for qTest update payload.`);
         }
 
-        if (constants.DefectResolvedReasonFieldID && resolvedReasonValue) {
+        if (constants.DefectResolvedReasonFieldID && resolvedReasonValue !== null && resolvedReasonValue !== undefined) {
+            const parsedResolvedReasonFieldId = parseInt(constants.DefectResolvedReasonFieldID, 10);
             const parsedResolvedReasonValue = parseInt(resolvedReasonValue, 10);
             requestBody.properties.push({
-                field_id: constants.DefectResolvedReasonFieldID,
+                field_id: Number.isNaN(parsedResolvedReasonFieldId)
+                    ? constants.DefectResolvedReasonFieldID
+                    : parsedResolvedReasonFieldId,
                 field_value: Number.isNaN(parsedResolvedReasonValue)
                     ? resolvedReasonValue
                     : parsedResolvedReasonValue,
             });
-            console.log(`[Info] Added Resolved Reason '${resolvedReasonValue}' to qTest update payload.`);
+            console.log(
+                resolvedReasonValue === ""
+                    ? `[Info] Clearing Resolved Reason in qTest update payload.`
+                    : `[Info] Added Resolved Reason '${resolvedReasonValue}' to qTest update payload.`
+            );
         } else {
             console.log(`[Warn] No Resolved Reason provided or mapping not found`);
         }

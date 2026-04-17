@@ -687,7 +687,24 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
       }
     }
 
-    function mapStatus(qtestStatus) {
+    function mapStatus(qtestStatus, qtestStatusLabel) {
+      const normalizedStatusLabel = normalizeLookupLabel(qtestStatusLabel);
+      switch (normalizedStatusLabel) {
+        case "new": return "New";
+        case "active": return "Active";
+        case "in analysis": return "In Analysis";
+        case "in resolution": return "In Resolution";
+        case "awaiting implementation": return "Awaiting Implementation";
+        case "resolved": return "Resolved";
+        case "retest": return "Retest";
+        case "reopened": return "Reopened";
+        case "closed": return "Closed";
+        case "on hold": return "On Hold";
+        case "rejected": return "Rejected";
+        case "triage": return "Triage";
+        default: break;
+      }
+
       const statusId = parseInt(qtestStatus, 10);
       switch (statusId) {
         case 10001: return "New";
@@ -857,7 +874,11 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const mappedSeverity = mapSeverity(severityProp?.field_value);
     const mappedPriority = mapPriority(priorityProp?.field_value);
     const mappedDefectType = mapDefectType(defectTypeProp?.field_value);
-    const mappedStatus = mapStatus(statusProp?.field_value);
+    const statusLabel = await getDefectFieldLabel(constants.DefectStatusFieldID, statusProp);
+    const mappedStatus = mapStatus(statusProp?.field_value, statusLabel);
+    const isResolvedReasonLockedState = ["new", "active"].includes(
+      normalizeLookupLabel(mappedStatus || statusLabel || "")
+    );
     const mappedBugStage = mapAffectedRelease(affectedReleaseProp?.field_value);
     console.log("[Debug] Root Cause target ADO field ref:", adoFieldRefs.rootCause);
     console.log("[Debug] qTest Root Cause source:", {
@@ -1088,11 +1109,11 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
       console.log(`[Info] Skipping Closed Date sync because outbound ADO State is '${mappedStatus || "(blank)"}'.`);
     }
 
-    if (resolvedReasonLabel && mappedStatus !== "New" && curResolvedReason !== resolvedReasonLabel) {
+    if (resolvedReasonLabel && !isResolvedReasonLockedState && curResolvedReason !== resolvedReasonLabel) {
       console.log("[Info] Updating Resolved Reason:", { from: curResolvedReason || "(empty)", to: resolvedReasonLabel });
       patchData.push(buildFieldPatchOperation(adoFieldRefs.resolvedReason, resolvedReasonLabel));
-    } else if (resolvedReasonLabel && mappedStatus === "New") {
-      console.log("[Info] Skipping Resolved Reason sync because outbound ADO State is 'New'.");
+    } else if (resolvedReasonLabel && isResolvedReasonLockedState) {
+      console.log(`[Info] Skipping Resolved Reason sync because outbound ADO State is '${mappedStatus || statusLabel || "(blank)"}'.`);
     }
 
     if (adoFieldRefs.application && appLabel && curApp !== appLabel) {
