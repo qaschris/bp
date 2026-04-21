@@ -3,8 +3,8 @@ const { Webhooks } = require("@qasymphony/pulse-sdk");
 
 exports.handler = async function ({ event, constants, triggers }, context, callback) {
     const emittedMessageKeys = new Set();
-    const QUEUE_TRIGGER_NAME = "RequirementMigrationQueueEvent";
-    const BATCH_TRIGGER_NAME = "RequirementMigrationBatchEvent";
+    const QUEUE_TRIGGER_NAME = "QueueRequirementMigration.P1";
+    const BATCH_TRIGGER_NAME = "ProcessRequirementMigrationBatch.P1";
 
     function emitEvent(name, payload) {
         const trigger = triggers.find(item => item.name === name);

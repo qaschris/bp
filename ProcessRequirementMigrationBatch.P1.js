@@ -9,7 +9,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
     const runId = normalizeText(event?.runId) || `requirement-migration-${Date.now()}`;
     const migrationTargetParentId = normalizeText(firstNonEmpty(event?.targetParentId, constants.RequirementParentID));
-    const batchTriggerName = "RequirementMigrationBatchEvent";
+    const batchTriggerName = "ProcessRequirementMigrationBatch.P1";
     const startTimeMs = Date.now();
     const maxRunMs = parsePositiveInt(event?.maxRunMs, 240000);
 
@@ -586,15 +586,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         return workItem?.fields || {};
     }
 
-    function escapeHtml(value) {
-        return String(value ?? "")
-            .replace(/&/g, "&amp;")
-            .replace(/</g, "&lt;")
-            .replace(/>/g, "&gt;")
-            .replace(/"/g, "&quot;")
-            .replace(/'/g, "&#39;");
-    }
-
     function getAdoHtmlUrl(workItem) {
         return firstNonEmpty(
             workItem?._links?.html?.href,
@@ -606,15 +597,15 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         const fields = extractFieldsFromAdoWorkItem(workItem);
         const sections = [];
 
-        sections.push(`<a href="${escapeHtml(getAdoHtmlUrl(workItem))}" target="_blank">Open in Azure DevOps</a>`);
-        sections.push(`<b>Type:</b> ${escapeHtml(getAdoFieldValue(fields, adoFieldRefs.workItemType))}`);
-        sections.push(`<b>Area:</b> ${escapeHtml(getAdoFieldValue(fields, adoFieldRefs.areaPath))}`);
-        sections.push(`<b>Iteration:</b> ${escapeHtml(getAdoFieldValue(fields, adoFieldRefs.iterationPath))}`);
-        sections.push(`<b>State:</b> ${escapeHtml(getAdoFieldValue(fields, adoFieldRefs.state))}`);
-        sections.push(`<b>Reason:</b> ${escapeHtml(getAdoFieldValue(fields, adoFieldRefs.reason))}`);
-        sections.push(`<b>Complexity:</b> ${escapeHtml(getAdoFieldValue(fields, adoFieldRefs.complexity))}`);
-        sections.push(`<b>Acceptance Criteria:</b> ${escapeHtml(getAdoFieldValue(fields, adoFieldRefs.acceptanceCriteria))}`);
-        sections.push(`<b>Description:</b> ${escapeHtml(getAdoFieldValue(fields, adoFieldRefs.description))}`);
+        sections.push(`<a href="${getAdoHtmlUrl(workItem)}" target="_blank">Open in Azure DevOps</a>`);
+        sections.push(`<b>Type:</b> ${getAdoFieldValue(fields, adoFieldRefs.workItemType)}`);
+        sections.push(`<b>Area:</b> ${getAdoFieldValue(fields, adoFieldRefs.areaPath)}`);
+        sections.push(`<b>Iteration:</b> ${getAdoFieldValue(fields, adoFieldRefs.iterationPath)}`);
+        sections.push(`<b>State:</b> ${getAdoFieldValue(fields, adoFieldRefs.state)}`);
+        sections.push(`<b>Reason:</b> ${getAdoFieldValue(fields, adoFieldRefs.reason)}`);
+        sections.push(`<b>Complexity:</b> ${getAdoFieldValue(fields, adoFieldRefs.complexity)}`);
+        sections.push(`<b>Acceptance Criteria:</b> ${getAdoFieldValue(fields, adoFieldRefs.acceptanceCriteria)}`);
+        sections.push(`<b>Description:</b> ${getAdoFieldValue(fields, adoFieldRefs.description)}`);
 
         return sections.join("<br>");
     }

@@ -280,14 +280,14 @@ Bring pre-existing qTest requirements forward into the new module and metadata s
 **Representative Code Snippet**
 
 ```js
-await emitEvent("RequirementMigrationBatchEvent", {
+await emitEvent("ProcessRequirementMigrationBatch.P1", {
     runId,
     requirementIds: batchIds,
     targetParentId,
 });
 
 if (remainingIds.length) {
-    await emitEvent("RequirementMigrationBatchEvent", {
+    await emitEvent("ProcessRequirementMigrationBatch.P1", {
         runId,
         requirementIds: remainingIds,
         continuationCount: continuationCount + 1,

@@ -400,8 +400,8 @@ Shared constants still used:
 
 Hardcoded internal trigger names used by the rules:
 
-- `RequirementMigrationQueueEvent`
-- `RequirementMigrationBatchEvent`
+- `QueueRequirementMigration.P1`
+- `ProcessRequirementMigrationBatch.P1`
 
 Recommended kickoff payload fields:
 
