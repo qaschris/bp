@@ -610,6 +610,59 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         }
     }
 
+    function htmlToText(html = "") {
+        return String(html)
+            .replace(/<style[\s\S]*?<\/style>/gi, "")
+            .replace(/<script[\s\S]*?<\/script>/gi, "")
+            .replace(/<\/div>|<\/li>|<\/p>/gi, "\n")
+            .replace(/<li>/gi, "  *  ")
+            .replace(/<br\s*\/?>/gi, "\n")
+            .replace(/<[^>]+>/gi, "")
+            .replace(/\n\s*\n/g, "\n")
+            .trim();
+    }
+
+    function generateCID(text) {
+        return Buffer.from(String(text || "")).toString("base64").slice(0, 20);
+    }
+
+    async function getQtestComments(defectId) {
+        const url = `${normalizeBaseUrl(constants.ManagerURL)}/api/v3/projects/${constants.ProjectID}/defects/${defectId}/comments`;
+        const response = await doqTestRequest(url, "GET", null);
+        return response?.items || [];
+    }
+
+    async function createQtestComment(defectId, content) {
+        const url = `${normalizeBaseUrl(constants.ManagerURL)}/api/v3/projects/${constants.ProjectID}/defects/${defectId}/comments`;
+        await doqTestRequest(url, "POST", { content });
+    }
+
+    async function syncComment(defectId, text) {
+        const clean = htmlToText(text);
+        if (!clean) return;
+
+        const cid = generateCID(clean);
+        const existing = await getQtestComments(defectId);
+
+        if (existing.some(comment => comment.content?.includes(`[CID:${cid}]`))) {
+            console.log("[Info] Duplicate comment skipped");
+            return;
+        }
+
+        const author = event.resource?.revisedBy?.displayName || "Unknown";
+        const date = new Date(
+            event.resource?.fields?.["System.ChangedDate"]?.newValue ||
+            event.resource?.revision?.fields?.["System.ChangedDate"]
+        ).toLocaleString();
+
+        const content = `[From ADO]
+${author} - ${date}
+
+${clean}`;
+
+        await createQtestComment(defectId, content);
+    }
+
     function formatDiscussion(comments) {
         if (!comments || comments.length === 0) return "";
 
@@ -1009,6 +1062,24 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const defectContext = defectToUpdate
         ? { id: defectToUpdate.id, pid: defectToUpdate.pid }
         : null;
+
+    if (event.eventType === eventType.UPDATED) {
+        const change = event.resource?.fields?.["System.CommentCount"];
+        if (change?.newValue > change?.oldValue) {
+            const adoComment =
+                event.resource?.revision?.fields?.["System.History"] ||
+                event.resource?.fields?.["System.History"];
+
+            if (adoComment && !adoComment.includes("[From qTest]")) {
+                try {
+                    await syncComment(defectToUpdate.id, adoComment);
+                } catch (error) {
+                    console.error("[Error] Failed to sync defect comment from Azure DevOps to qTest.", error);
+                }
+            }
+        }
+    }
+
     const adoState = getAdoFieldValue(fields, adoFieldRefs.state);
     console.log(`[Info] ADO State value: '${adoState}'`);
 

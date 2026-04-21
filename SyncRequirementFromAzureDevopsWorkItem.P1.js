@@ -261,6 +261,14 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         Authorization: `bearer ${constants.QTEST_TOKEN}`,
     };
 
+    function getADOHeaders() {
+        const token = Buffer.from(`:${constants.AZDO_TOKEN}`).toString("base64");
+        return {
+            "Content-Type": "application/json",
+            Authorization: `Basic ${token}`,
+        };
+    }
+
     function logDivider(title) {
         console.log(`==================== ${title} ====================`);
     }
@@ -271,13 +279,13 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         return clone;
     }
 
-    async function doRequest(url, method, requestBody) {
-        const opts = { url, method, headers: standardHeaders };
+    async function doRequest(url, method, requestBody, headers = standardHeaders) {
+        const opts = { url, method, headers };
         if (requestBody !== undefined && requestBody !== null && method !== "GET") opts.data = requestBody;
 
         logDivider(`HTTP ${method}`);
         console.log(`[Debug] URL: ${url}`);
-        console.log(`[Debug] Headers: ${safeJson(sanitizeHeadersForLog(standardHeaders))}`);
+        console.log(`[Debug] Headers: ${safeJson(sanitizeHeadersForLog(headers))}`);
         console.log(`[Debug] Request Payload: ${opts.data !== undefined ? safeJson(opts.data) : "<none>"}`);
 
         try {
@@ -300,6 +308,106 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
     function post(url, requestBody) { return doRequest(url, "POST", requestBody); }
     function put(url, requestBody) { return doRequest(url, "PUT", requestBody); }
+
+    async function getQtestComments(requirementId) {
+        const url = `${normalizeBaseUrl(constants.ManagerURL)}/api/v3/projects/${constants.ProjectID}/requirements/${requirementId}/comments`;
+        const response = await doRequest(url, "GET", null, standardHeaders);
+        return response?.items || [];
+    }
+
+    async function createQtestComment(requirementId, content) {
+        const url = `${normalizeBaseUrl(constants.ManagerURL)}/api/v3/projects/${constants.ProjectID}/requirements/${requirementId}/comments`;
+        return doRequest(url, "POST", { content }, standardHeaders);
+    }
+
+    async function extractAllComments(workItemId) {
+        const url = `${constants.AzDoProjectURL}/_apis/wit/workItems/${workItemId}/comments?api-version=7.0-preview.3`;
+        const maxAttempts = 3;
+
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+            try {
+                console.log(`[Debug] Fetching comments (attempt ${attempt + 1})`);
+                const response = await doRequest(url, "GET", null, getADOHeaders());
+                const comments = response?.comments || [];
+
+                if (comments.length > 0) {
+                    console.log(`[Info] Fetched ${comments.length} comments`);
+                    return comments
+                        .filter(comment => comment?.text?.trim())
+                        .map(comment => ({
+                            commentText: comment.text,
+                            commentId: comment.id,
+                        }));
+                }
+
+                console.log("[Info] No comments yet, retrying...");
+            } catch (error) {
+                console.warn("[Warn] Comment fetch failed, retrying...");
+            }
+
+            await new Promise(resolve => setTimeout(resolve, 1500));
+        }
+
+        console.log("[Info] No comments found after retries");
+        return [];
+    }
+
+    function isCommentAdded(eventData) {
+        const newCount = eventData.resource?.revision?.fields?.["System.CommentCount"] || 0;
+        const oldCount = eventData.resource?.fields?.["System.CommentCount"]?.oldValue || 0;
+        return newCount > oldCount;
+    }
+
+    async function syncCommentsIfNeeded(eventData, workItemId, qtestRequirementId) {
+        if (!qtestRequirementId) return;
+
+        if (!isCommentAdded(eventData)) {
+            console.log("[Info] No new comment detected");
+            return;
+        }
+
+        console.log("[Info] Comment detected. Fetching all from API...");
+        const comments = await extractAllComments(workItemId);
+
+        if (comments.length === 0) {
+            console.log("[Info] No comment text found");
+            return;
+        }
+
+        let existing = [];
+        try {
+            existing = (await getQtestComments(qtestRequirementId)).slice(0, 50);
+        } catch (error) {
+            console.error("[Error] Failed to fetch qTest comments");
+            return;
+        }
+
+        for (const { commentText, commentId } of comments) {
+            const marker = `[CID:${commentId}]`;
+            const alreadyExists = existing.some(comment => (comment.content || "").includes(marker));
+
+            if (alreadyExists) {
+                console.log(`[Info] Comment ${commentId} already synced. Skipping...`);
+                continue;
+            }
+
+            const author = eventData.resource?.revisedBy?.displayName || "Unknown";
+            const date = new Date().toLocaleString();
+            const content = `[From ADO]
+${author} - ${date}
+${commentText}
+
+${marker}`;
+
+            try {
+                await createQtestComment(qtestRequirementId, content);
+                existing.unshift({ content });
+                console.log(`[Info] Comment ${commentId} synced successfully`);
+            } catch (error) {
+                console.error(`[Error] Failed to create qTest comment for ${commentId}`, error);
+            }
+        }
+    }
 
     async function getFieldDefinitions(objectType) {
         const cacheKey = `${constants.ProjectID}:${objectType}`;
@@ -947,7 +1055,9 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             case eventType.UPDATED: {
                 workItemId = event?.resource?.workItemId;
                 console.log(`[Info] Update workitem event received for 'WI${workItemId}'.`);
-                if (!shouldProcessRequirementUpdate(event)) return;
+                const commentAdded = isCommentAdded(event);
+                const shouldProcessUpdate = shouldProcessRequirementUpdate(event);
+                if (!shouldProcessUpdate && !commentAdded) return;
 
                 const getRequirementResult = await getRequirementByWorkItemId(workItemId);
                 if (getRequirementResult.failed) return;
@@ -990,11 +1100,22 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         console.log(`[Debug] Target Module ID: ${desiredState.targetModuleId}`);
         console.log(`[Debug] Desired Properties: ${safeJson(buildRequirementProperties(desiredState))}`);
 
+        let syncedRequirement;
         if (requirementToUpdate) {
-            await updateRequirement(requirementToUpdate, desiredState);
+            syncedRequirement = await updateRequirement(requirementToUpdate, desiredState);
         } else {
-            await createRequirement(desiredState);
+            syncedRequirement = await createRequirement(desiredState);
         }
+
+        let qtestRequirementId = syncedRequirement?.id || requirementToUpdate?.id;
+        if (!qtestRequirementId) {
+            const getRequirementResult = await getRequirementByWorkItemId(workItemId);
+            if (!getRequirementResult.failed) {
+                qtestRequirementId = getRequirementResult.requirement?.id;
+            }
+        }
+
+        await syncCommentsIfNeeded(event, workItemId, qtestRequirementId);
     } catch (error) {
         if (!error?.__friendlyFailureEmitted) {
             emitFriendlyFailure({

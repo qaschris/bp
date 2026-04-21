@@ -604,6 +604,121 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         .trim();
     }
 
+    async function getQtestComments(defectId, projectId) {
+      const url = `${normalizeBaseUrl(constants.ManagerURL)}/api/v3/projects/${projectId}/defects/${defectId}/comments`;
+
+      try {
+        const response = await axios.get(url, {
+          headers: { Authorization: `Bearer ${constants.QTEST_TOKEN}` }
+        });
+        return response.data?.items || response.data || [];
+      } catch (error) {
+        console.warn("[Warn] Fetch qTest comments failed");
+        return [];
+      }
+    }
+
+    async function getExistingAdoComments(workItemId, encodedToken) {
+      const url = `${constants.AzDoProjectURL}/_apis/wit/workItems/${workItemId}/comments?api-version=6.0-preview.3`;
+
+      try {
+        const response = await axios.get(url, {
+          headers: { Authorization: `Basic ${encodedToken}` }
+        });
+        return response.data?.comments?.map(comment => (comment.text || "").trim()).filter(Boolean) || [];
+      } catch (error) {
+        console.warn("[Warn] Fetch ADO comments failed");
+        return [];
+      }
+    }
+
+    function formatComment(content, author, commentId, createdDate, lastModifiedUser, lastModifiedDate) {
+      const text = htmlToPlainText(content || "");
+      const name = author || lastModifiedUser || "Unknown";
+      const dateStr = createdDate || lastModifiedDate || "Unknown date";
+
+      return `[From qTest]<br>
+${name} - ${dateStr}<br>
+${text}`;
+    }
+
+    async function syncQtestCommentsToAdo({
+      qtestComments,
+      existingComments,
+      workItemId,
+      defectId,
+      projectId,
+      encodedToken,
+      qTestDefectUrl,
+      lastModifiedUser,
+      lastModifiedDate,
+    }) {
+      let commentsSynced = 0;
+
+      for (const comment of qtestComments.sort((left, right) => new Date(left.created_date) - new Date(right.created_date))) {
+        const rawText = comment.content || comment.text || "";
+        if (!rawText || rawText.includes("[From ADO]") || rawText.includes("[From qTest]")) {
+          continue;
+        }
+
+        const commentId = comment.id || comment.comment_id || Date.now();
+        const alreadyExists = existingComments.some(existingComment =>
+          existingComment.includes(`[CID:${commentId}]`) || existingComment.includes(rawText.trim())
+        );
+        if (alreadyExists) {
+          continue;
+        }
+
+        const formattedText = formatComment(
+          rawText,
+          comment.created_by?.name || comment.created_by?.username,
+          commentId,
+          comment.created_date,
+          lastModifiedUser,
+          lastModifiedDate
+        );
+        if (!formattedText.trim()) {
+          continue;
+        }
+
+        try {
+          const commentUrl = `${constants.AzDoProjectURL}/_apis/wit/workItems/${workItemId}/comments?api-version=6.0-preview.3`;
+          await axios.post(commentUrl, { text: formattedText }, {
+            headers: { Authorization: `Basic ${encodedToken}` }
+          });
+          commentsSynced++;
+          existingComments.unshift(formattedText.trim());
+          console.log(`[SYNCED] Comment added (CID:${commentId})`);
+        } catch (error) {
+          console.error("[Error] Failed to post comment:", error.message);
+        }
+
+        if (constants.DefectDiscussionFieldID) {
+          try {
+            await axios.put(
+              qTestDefectUrl,
+              {
+                properties: [
+                  {
+                    field_id: constants.DefectDiscussionFieldID,
+                    field_value: new Date().toISOString()
+                  }
+                ]
+              },
+              {
+                headers: { Authorization: `Bearer ${constants.QTEST_TOKEN}` }
+              }
+            );
+          } catch (error) {
+            console.error("[Error] Failed to force qTest defect change after comment sync:", error.message);
+          }
+        }
+      }
+
+      console.log(`[Info] Total comments synced: ${commentsSynced}`);
+      return commentsSynced;
+    }
+
     function formatDateOnly(value) {
       if (!value) return "";
       const date = new Date(value);
@@ -789,6 +904,38 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
       return;
     }
 
+    let lastModifiedUser = "Unknown";
+    if (defect.last_modified_user_id) {
+      try {
+        const userResponse = await axios.get(`https://${constants.ManagerURL}/api/v3/users/${defect.last_modified_user_id}`, {
+          headers: { Authorization: `Bearer ${constants.QTEST_TOKEN}` }
+        });
+        lastModifiedUser = userResponse.data?.name || userResponse.data?.username || "Unknown";
+      } catch (error) {
+        console.warn("[Warn] Could not fetch last modified user:", error.message);
+      }
+    }
+
+    let lastModifiedDateRaw = defect?.last_modified_date || defect?.updated_date || null;
+    let lastModifiedDate = "Unknown date";
+    if (lastModifiedDateRaw) {
+      let dateObject = new Date(lastModifiedDateRaw);
+      if (Number.isNaN(dateObject.getTime()) && /^\d+$/.test(lastModifiedDateRaw)) {
+        dateObject = new Date(parseInt(lastModifiedDateRaw, 10));
+      }
+      if (!Number.isNaN(dateObject.getTime())) {
+        const year = dateObject.getFullYear();
+        const month = String(dateObject.getMonth() + 1).padStart(2, "0");
+        const day = String(dateObject.getDate()).padStart(2, "0");
+        const hours = String(dateObject.getHours()).padStart(2, "0");
+        const minutes = String(dateObject.getMinutes()).padStart(2, "0");
+        lastModifiedDate = `${year}-${month}-${day} ${hours}:${minutes}`;
+      }
+    }
+
+    console.log("[Info] Last Modified User:", lastModifiedUser);
+    console.log("[Info] Last Modified Date:", lastModifiedDate);
+
     if (constants.SyncUserRegex) {
       const updaterName = defect?.updated_by?.name || defect?.last_modified_by?.name || "";
       if (new RegExp(constants.SyncUserRegex, "i").test(updaterName)) {
@@ -842,6 +989,8 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
       });
       return;
     }
+
+    const encodedToken = Buffer.from(`:${constants.AZDO_TOKEN}`).toString("base64");
 
     const cur = adoCurrent?.fields || {};
     const curAreaPath = norm(getAdoFieldValue(cur, adoFieldRefs.areaPath));
@@ -1046,6 +1195,9 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const curAssignedTo = norm(extractAdoIdentityEmail(curAssignedToRaw));
     const curTargetDate = normalizeDateOnly(getAdoFieldValue(cur, adoFieldRefs.targetDate));
 
+    const qtestComments = await getQtestComments(defectId, projectId);
+    const existingComments = await getExistingAdoComments(workItemId, encodedToken);
+
     const desiredDescription = stripEmbeddedAdoLinkText(description || "");
     const desiredDescriptionPlain = htmlToPlainText(desiredDescription);
     const desiredProposedFix = proposedFix || "";
@@ -1055,6 +1207,18 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     console.log("newTargetDate", desiredTargetDate, isoDate);
     console.log("[Info] Current ADO Resolved Reason:", curResolvedReason || "(empty)");
     console.log("[Info] Desired qTest Resolved Reason:", resolvedReasonLabel || "(empty)");
+
+    await syncQtestCommentsToAdo({
+      qtestComments,
+      existingComments,
+      workItemId,
+      defectId,
+      projectId,
+      encodedToken,
+      qTestDefectUrl,
+      lastModifiedUser,
+      lastModifiedDate,
+    });
 
     const patchData = [];
 
@@ -1198,7 +1362,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     }
 
     const adoPatchUrl = `${constants.AzDoProjectURL}/_apis/wit/workitems/${workItemId}?api-version=6.0`;
-    const encodedToken = Buffer.from(`:${constants.AZDO_TOKEN}`).toString("base64");
 
     console.log("[Info] Sending update to ADO:", JSON.stringify(patchData, null, 2));
 
