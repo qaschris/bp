@@ -306,6 +306,21 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         return doRequest(url, "POST", { content }, standardHeaders);
     }
 
+    function normalizeCommentText(value) {
+        if (!value) return "";
+
+        return String(value)
+            .replace(/<style[\s\S]*?<\/style>/gi, "")
+            .replace(/<script[\s\S]*?<\/script>/gi, "")
+            .replace(/<\/div>|<\/li>|<\/p>/gi, "\r\n")
+            .replace(/<li>/gi, "- ")
+            .replace(/<br\s*\/?>/gi, "\r\n")
+            .replace(/<[^>]+>/gi, "")
+            .replace(/&nbsp;/gi, " ")
+            .replace(/\r?\n[ \t]*\r?\n[ \t]*/g, "\r\n")
+            .trim();
+    }
+
     async function extractAllComments(workItemId) {
         const url = `${constants.AzDoProjectURL}/_apis/wit/workItems/${workItemId}/comments?api-version=7.0-preview.3`;
         const maxAttempts = 3;
@@ -318,11 +333,12 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
                 if (comments.length > 0) {
                     console.log(`[Info] Fetched ${comments.length} comments`);
                     return comments
-                        .filter(comment => comment?.text?.trim())
                         .map(comment => ({
-                            commentText: comment.text,
+                            commentText: normalizeCommentText(comment?.text),
                             commentId: comment.id,
-                        }));
+                        }))
+                        .filter(comment => comment.commentText)
+                        ;
                 }
 
                 console.log("[Info] No comments yet, retrying...");
