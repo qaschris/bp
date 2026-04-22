@@ -672,7 +672,7 @@ ${clean}`;
         await createQtestComment(defectId, content);
     }
 
-    function formatDiscussion(comments) {
+/*     function formatDiscussion(comments) {
         if (!comments || comments.length === 0) return "";
 
         return comments.map(c => {
@@ -688,7 +688,7 @@ ${clean}`;
                 </div>
                 <hr/>`;
         }).join("");
-    }
+    } */
 
     async function resolveQtestUserIdByUsernameOrUpn(identity, standardHeaders) {
         if (!identity) return null;
@@ -1173,15 +1173,15 @@ ${clean}`;
         adoComments = adoComments.filter(c => !regex.test(c.createdBy?.displayName || ""));
     }
 
-    const discussionHtml = formatDiscussion(adoComments);
+//    const discussionHtml = formatDiscussion(adoComments);
     let qtestDiscussionValue = "";
 
-    if (discussionHtml) {
+/*     if (discussionHtml) {
         qtestDiscussionValue = `
                     <h3>ADO Discussion</h3>
                     ${discussionHtml}
                     `;
-    }
+    } */
 
     const adoAssignedToRaw = getAdoFieldValue(fields, adoFieldRefs.assignedTo);
     const adoAssignedToIdentity = extractUpnOrEmailFromAdoAssignedTo(adoAssignedToRaw);
