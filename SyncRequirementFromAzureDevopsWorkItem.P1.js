@@ -247,7 +247,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             return true;
         }
 
-        console.log(`[Debug] Updated field refs: ${safeJson(changedFieldRefs)}`);
         if (!changedFieldRefs.some(fieldRef => relevantUpdatedFieldRefs.has(fieldRef))) {
             console.log("[Info] Updated event does not include any qTest-synced requirement fields. Skipping to prevent loop.");
             return false;
@@ -273,25 +272,12 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         console.log(`==================== ${title} ====================`);
     }
 
-    function sanitizeHeadersForLog(headers) {
-        const clone = { ...(headers || {}) };
-        if (clone.Authorization) clone.Authorization = "[REDACTED]";
-        return clone;
-    }
-
     async function doRequest(url, method, requestBody, headers = standardHeaders) {
         const opts = { url, method, headers };
         if (requestBody !== undefined && requestBody !== null && method !== "GET") opts.data = requestBody;
 
-        logDivider(`HTTP ${method}`);
-        console.log(`[Debug] URL: ${url}`);
-        console.log(`[Debug] Headers: ${safeJson(sanitizeHeadersForLog(headers))}`);
-        console.log(`[Debug] Request Payload: ${opts.data !== undefined ? safeJson(opts.data) : "<none>"}`);
-
         try {
             const response = await axios(opts);
-            console.log(`[Debug] HTTP Status: ${response.status}`);
-            console.log(`[Debug] Response Body: ${safeJson(response.data)}`);
             return response.data;
         } catch (error) {
             console.error("[Error] HTTP request failed.");
@@ -326,7 +312,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
         for (let attempt = 0; attempt < maxAttempts; attempt++) {
             try {
-                console.log(`[Debug] Fetching comments (attempt ${attempt + 1})`);
                 const response = await doRequest(url, "GET", null, getADOHeaders());
                 const comments = response?.comments || [];
 
@@ -414,7 +399,6 @@ ${marker}`;
         if (qtestMetadataCache[cacheKey]) return qtestMetadataCache[cacheKey];
 
         const url = `${normalizeBaseUrl(constants.ManagerURL)}/api/v3/projects/${constants.ProjectID}/settings/${objectType}/fields`;
-        console.log(`[Debug] Fetching qTest field definitions for '${objectType}' from '${url}'.`);
         const response = await axios.get(url, { headers: standardHeaders });
         const fields = normalizeFieldResponse(response.data);
         qtestMetadataCache[cacheKey] = fields;
@@ -827,20 +811,6 @@ ${marker}`;
         const adoEntity = getAdoFieldValue(fields, adoFieldRefs.entity);
         const adoAssignedTo = firstNonEmpty(fields[adoFieldRefs.assignedTo]);
 
-        logDivider("EXTRACTED ADO FIELDS");
-        console.log(`[Debug] Event Type: ${eventData.eventType}`);
-        console.log(`[Debug] Work Item Type: ${adoWorkItemType}`);
-        console.log(`[Debug] Title: ${adoTitle}`);
-        console.log(`[Debug] AreaPath: ${adoAreaPath}`);
-        console.log(`[Debug] IterationPath: ${adoIterationPath}`);
-        console.log(`[Debug] State: ${getAdoFieldValue(fields, adoFieldRefs.state)}`);
-        console.log(`[Debug] Reason: ${getAdoFieldValue(fields, adoFieldRefs.reason)}`);
-        console.log(`[Debug] Complexity: ${adoComplexity}`);
-        console.log(`[Debug] AssignedTo Raw: ${safeJson(adoAssignedTo)}`);
-        console.log(`[Debug] ApplicationName: ${adoApplicationName}`);
-        console.log(`[Debug] FitGap: ${safeJson(adoFitGap)}`);
-        console.log(`[Debug] BPEntity: ${safeJson(adoEntity)}`);
-
         const complexityValue = await resolveRequirementFieldValue(
             constants.RequirementComplexityFieldID,
             adoComplexity,
@@ -982,11 +952,6 @@ ${marker}`;
         const url = `${normalizeBaseUrl(constants.ManagerURL)}/api/v3/projects/${constants.ProjectID}/requirements/${requirementToUpdate.id}${query}`;
 
         try {
-            logDivider("UPDATE REQUIREMENT");
-            console.log(`[Debug] Requirement ID: ${requirementToUpdate.id}`);
-            console.log(`[Debug] Changed Fields: ${safeJson(evaluation.changedFields)}`);
-            console.log(`[Debug] Update URL: ${url}`);
-            console.log(`[Debug] Final Update Payload: ${safeJson(evaluation.requestBody)}`);
             const updated = await put(url, evaluation.requestBody);
             emitWarnings(desiredState.warnings, requirementDetails, desiredState.workItemId);
             return updated || requirementDetails;
@@ -1012,10 +977,6 @@ ${marker}`;
         };
 
         try {
-            logDivider("CREATE REQUIREMENT");
-            console.log(`[Debug] Target Module ID: ${desiredState.targetModuleId}`);
-            console.log(`[Debug] Create URL: ${url}`);
-            console.log(`[Debug] Final Create Payload: ${safeJson(requestBody)}`);
             const created = await post(url, requestBody);
             emitWarnings(desiredState.warnings, created, desiredState.workItemId);
             return created;
@@ -1042,9 +1003,6 @@ ${marker}`;
 
     try {
         if (!validateRequiredConfiguration()) return;
-
-        logDivider("RAW INCOMING EVENT");
-        console.log(safeJson(event));
 
         switch (event.eventType) {
             case eventType.CREATED:
@@ -1093,12 +1051,6 @@ ${marker}`;
         }
 
         const desiredState = await buildDesiredRequirementState(event, requirementToUpdate);
-
-        logDivider("BUILT REQUIREMENT CONTENT");
-        console.log(`[Debug] Requirement Name: ${desiredState.name}`);
-        console.log(`[Debug] Requirement Description: ${desiredState.description}`);
-        console.log(`[Debug] Target Module ID: ${desiredState.targetModuleId}`);
-        console.log(`[Debug] Desired Properties: ${safeJson(buildRequirementProperties(desiredState))}`);
 
         let syncedRequirement;
         if (requirementToUpdate) {
