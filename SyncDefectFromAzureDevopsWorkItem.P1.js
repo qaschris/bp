@@ -461,6 +461,15 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             return "";
         }
 
+        const statusMap = {
+            "active": "In Analysis",
+            "cancelled": "Rejected",
+        };
+        const mappedStatus = statusMap[normalizeLabel(normalizedStatus)];
+        if (mappedStatus) {
+            return mappedStatus;
+        }
+
         return normalizedStatus;
     }
 
@@ -1063,7 +1072,7 @@ ${clean}`;
         ? { id: defectToUpdate.id, pid: defectToUpdate.pid }
         : null;
 
-    if (event.eventType === eventType.UPDATED) {
+/*     if (event.eventType === eventType.UPDATED) {
         const change = event.resource?.fields?.["System.CommentCount"];
         if (change?.newValue > change?.oldValue) {
             const adoComment =
@@ -1078,7 +1087,40 @@ ${clean}`;
                 }
             }
         }
-    }
+    } */
+
+    if (event.eventType === eventType.UPDATED) {
+        const change = event.resource?.fields?.["System.CommentCount"];
+        const adoComment = event.resource?.revision?.fields?.["System.History"] 
+                        || event.resource?.fields?.["System.History"];
+        const commentMeta = event.resource?.revision?.commentVersionRef;
+
+        // Case 1: Inline field comment
+        if (adoComment && !adoComment.includes("[From qTest]")) {
+            try {
+                await syncComment(defectToUpdate.id, adoComment);
+            } catch (error) {
+                console.error("[Error] Failed to sync defect comment from Azure DevOps to qTest.", error);
+            }
+        }
+
+        // Case 2: Discussion comment
+        else if (change?.newValue > change?.oldValue && commentMeta) {
+            try {
+                const response = await fetch(commentMeta.url, {
+                    headers: { "Authorization": `Bearer ${process.env.ADO_PAT}` }
+                });
+                const commentData = await response.json();
+
+                const discussionText = commentData.text || commentData.markdown;
+                if (discussionText && !discussionText.includes("[From qTest]")) {
+                    await syncComment(defectToUpdate.id, discussionText);
+                }
+            } catch (error) {
+                console.error("[Error] Failed to fetch discussion comment from Azure DevOps.", error);
+            }
+        }
+    } 
 
     const adoState = getAdoFieldValue(fields, adoFieldRefs.state);
     console.log(`[Info] ADO State value: '${adoState}'`);
