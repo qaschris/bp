@@ -540,7 +540,7 @@ ${marker}`;
         }
     }
 
-    function buildRequirementDescription(eventData, options = {}) {
+    function buildRequirementDescription(eventData) {
         const fields = getFields(eventData);
         const workItemType = getAdoFieldValue(fields, adoFieldRefs.workItemType);
         const areaPath = getAdoFieldValue(fields, adoFieldRefs.areaPath);
@@ -555,10 +555,6 @@ ${marker}`;
         sections.push(`<b>Type:</b> ${workItemType}`);
         sections.push(`<b>Area:</b> ${areaPath}`);
         sections.push(`<b>Iteration:</b> ${iterationPath}`);
-        if (options.includeStatusDetails === true) {
-            sections.push(`<b>State:</b> ${getAdoFieldValue(fields, adoFieldRefs.state)}`);
-            sections.push(`<b>Reason:</b> ${getAdoFieldValue(fields, adoFieldRefs.reason)}`);
-        }
         sections.push(`<b>Complexity:</b> ${complexity}`);
         sections.push(`<b>Acceptance Criteria:</b> ${acceptanceCriteria}`);
         sections.push(`<b>Description:</b> ${description}`);
@@ -858,7 +854,7 @@ ${marker}`;
         }
     }
 
-    async function buildDesiredRequirementState(eventData, requirementContext = null, options = {}) {
+    async function buildDesiredRequirementState(eventData, requirementContext = null) {
         const fields = getFields(eventData);
         const workItemId = eventData?.resource?.workItemId || eventData?.resource?.id;
         const warnings = [];
@@ -987,9 +983,7 @@ ${marker}`;
             workItemId,
             namePrefix,
             name: buildRequirementName(namePrefix, eventData),
-            description: buildRequirementDescription(eventData, {
-                includeStatusDetails: options.includeStatusDetails === true,
-            }),
+            description: buildRequirementDescription(eventData),
             areaPath: adoAreaPath,
             complexityValue,
             workItemTypeValue,
@@ -1118,9 +1112,7 @@ ${marker}`;
         }
 
         const isCreatingRequirement = !requirementToUpdate;
-        const desiredState = await buildDesiredRequirementState(event, requirementToUpdate, {
-            includeStatusDetails: isCreatingRequirement,
-        });
+        const desiredState = await buildDesiredRequirementState(event, requirementToUpdate);
 
         let syncedRequirement;
         if (!isCreatingRequirement) {
