@@ -330,7 +330,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             adoFieldRefs.priority,
             adoFieldRefs.complexity,
             adoFieldRefs.ricefwId,
-            adoFieldRefs.testingStatus,
             adoFieldRefs.featureType,
             adoFieldRefs.ricefwConfiguration,
         ].filter(Boolean));
@@ -346,10 +345,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             "RequirementRICEFWConfigurationFieldID",
             "FeatureParentID",
         ].filter(name => !normalizeText(constants[name]));
-
-        if (!getRequirementTestingStatusFieldId()) {
-            missingQtestConstants.push("RequirementStatusFieldID");
-        }
 
         if (missingQtestConstants.length) {
             emitFriendlyFailure({
@@ -367,7 +362,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         const requiredAdoRefKeys = [
             "title", "workItemType", "areaPath", "iterationPath", "state", "reason",
             "assignedTo", "description", "acceptanceCriteria", "priority", "complexity",
-            "ricefwId", "testingStatus", "featureType",
+            "ricefwId", "featureType",
             "ricefwConfiguration",
         ];
         const missingAdoRefs = requiredAdoRefKeys.filter(key => !adoFieldRefs[key]);
@@ -915,7 +910,7 @@ ${marker}`;
         return normalizeValue(left) === normalizeValue(right);
     }
 
-    function buildRequirementProperties(desiredState) {
+    function buildRequirementProperties(desiredState, options = {}) {
         const properties = [
             { field_id: constants.RequirementDescriptionFieldID, field_value: desiredState.description },
             { field_id: constants.RequirementStreamSquadFieldID, field_value: desiredState.areaPath },
@@ -942,7 +937,9 @@ ${marker}`;
         if (desiredState.ricefwConfigurationValue) {
             properties.push({ field_id: constants.RequirementRICEFWConfigurationFieldID, field_value: desiredState.ricefwConfigurationValue });
         }
-        pushConfiguredResolvedProperty(properties, getRequirementTestingStatusFieldId(), desiredState.testingStatusValue);
+        if (options.includeTestingStatus === true) {
+            pushConfiguredResolvedProperty(properties, getRequirementTestingStatusFieldId(), desiredState.testingStatusValue);
+        }
 
         return properties;
     }
@@ -985,7 +982,7 @@ ${marker}`;
         }
     }
 
-    async function buildDesiredRequirementState(eventData, requirementContext = null) {
+    async function buildDesiredRequirementState(eventData, requirementContext = null, options = {}) {
         const fields = getFields(eventData);
         const workItemId = eventData?.resource?.workItemId || eventData?.resource?.id;
         const warnings = [];
@@ -1010,8 +1007,12 @@ ${marker}`;
 
         const ricefwConfigurationResolution = await resolveOptionalRequirementFieldValue(constants.RequirementRICEFWConfigurationFieldID, getAdoFieldValue(fields, adoFieldRefs.ricefwConfiguration), "RICEFW Configuration", requirementContext);
         if (ricefwConfigurationResolution.warningDetails) warnings.push(ricefwConfigurationResolution.warningDetails);
-        const testingStatusResolution = await resolveOptionalRequirementFieldValue(getRequirementTestingStatusFieldId(), getAdoFieldValue(fields, adoFieldRefs.testingStatus), "Testing Status", requirementContext);
-        if (testingStatusResolution.warningDetails) warnings.push(testingStatusResolution.warningDetails);
+        let testingStatusValue = null;
+        if (options.includeTestingStatus === true) {
+            const testingStatusResolution = await resolveOptionalRequirementFieldValue(getRequirementTestingStatusFieldId(), getAdoFieldValue(fields, adoFieldRefs.testingStatus), "Testing Status", requirementContext);
+            if (testingStatusResolution.warningDetails) warnings.push(testingStatusResolution.warningDetails);
+            testingStatusValue = testingStatusResolution.value;
+        }
         const stateResolution = await resolveOptionalRequirementFieldValue(constants.RequirementStateFieldID, getAdoFieldValue(fields, adoFieldRefs.state), "State", requirementContext);
         if (stateResolution.warningDetails) warnings.push(stateResolution.warningDetails);
         const reasonResolution = await resolveOptionalRequirementFieldValue(constants.RequirementReasonFieldID, getAdoFieldValue(fields, adoFieldRefs.reason), "Reason", requirementContext);
@@ -1032,7 +1033,7 @@ ${marker}`;
             reasonValue: reasonResolution.value,
             acceptanceCriteriaValue: getAdoFieldValue(fields, adoFieldRefs.acceptanceCriteria) || "",
             ricefwConfigurationValue: ricefwConfigurationResolution.value,
-            testingStatusValue: testingStatusResolution.value,
+            testingStatusValue,
             targetModuleId: await ensureModulePath(constants.FeatureParentID, adoAreaPath, adoIterationPath),
             warnings,
         };
@@ -1073,7 +1074,7 @@ ${marker}`;
         const requestBody = {
             name: desiredState.name,
             parent_id: desiredState.targetModuleId,
-            properties: buildRequirementProperties(desiredState),
+            properties: buildRequirementProperties(desiredState, { includeTestingStatus: true }),
         };
 
         try {
@@ -1188,14 +1189,17 @@ ${marker}`;
             return;
         }
 
-        const desiredState = await buildDesiredRequirementState(event, requirementToUpdate);
+        const isCreatingRequirement = !requirementToUpdate;
+        const desiredState = await buildDesiredRequirementState(event, requirementToUpdate, {
+            includeTestingStatus: isCreatingRequirement,
+        });
         console.log(`[Debug] RICEFW Requirement Name: ${desiredState.name}`);
         console.log(`[Debug] RICEFW Requirement Description: ${desiredState.description}`);
         console.log(`[Debug] RICEFW Target Module ID: ${desiredState.targetModuleId}`);
-        console.log(`[Debug] RICEFW Desired Properties: ${safeJson(buildRequirementProperties(desiredState))}`);
+        console.log(`[Debug] RICEFW Desired Properties: ${safeJson(buildRequirementProperties(desiredState, { includeTestingStatus: isCreatingRequirement }))}`);
 
         let syncedRequirement;
-        if (requirementToUpdate) {
+        if (!isCreatingRequirement) {
             syncedRequirement = await updateRequirement(requirementToUpdate, desiredState);
         } else {
             syncedRequirement = await createRequirement(desiredState);
