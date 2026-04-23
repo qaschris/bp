@@ -173,8 +173,6 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             adoFieldRefs.workItemType,
             adoFieldRefs.areaPath,
             adoFieldRefs.iterationPath,
-            adoFieldRefs.state,
-            adoFieldRefs.reason,
             adoFieldRefs.assignedTo,
             adoFieldRefs.description,
             adoFieldRefs.acceptanceCriteria,
@@ -213,7 +211,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
         adoFieldRefs = buildAdoFieldRefs();
         const requiredAdoRefKeys = [
-            "title", "workItemType", "areaPath", "iterationPath", "state", "reason",
+            "title", "workItemType", "areaPath", "iterationPath",
             "assignedTo", "description", "acceptanceCriteria", "priority", "complexity",
             "requirementCategory",
         ];
@@ -542,13 +540,11 @@ ${marker}`;
         }
     }
 
-    function buildRequirementDescription(eventData) {
+    function buildRequirementDescription(eventData, options = {}) {
         const fields = getFields(eventData);
         const workItemType = getAdoFieldValue(fields, adoFieldRefs.workItemType);
         const areaPath = getAdoFieldValue(fields, adoFieldRefs.areaPath);
         const iterationPath = getAdoFieldValue(fields, adoFieldRefs.iterationPath);
-        const state = getAdoFieldValue(fields, adoFieldRefs.state);
-        const reason = getAdoFieldValue(fields, adoFieldRefs.reason);
         const complexity = getAdoFieldValue(fields, adoFieldRefs.complexity);
         const acceptanceCriteria = getAdoFieldValue(fields, adoFieldRefs.acceptanceCriteria);
         const description = getAdoFieldValue(fields, adoFieldRefs.description);
@@ -559,8 +555,10 @@ ${marker}`;
         sections.push(`<b>Type:</b> ${workItemType}`);
         sections.push(`<b>Area:</b> ${areaPath}`);
         sections.push(`<b>Iteration:</b> ${iterationPath}`);
-        sections.push(`<b>State:</b> ${state}`);
-        sections.push(`<b>Reason:</b> ${reason}`);
+        if (options.includeStatusDetails === true) {
+            sections.push(`<b>State:</b> ${getAdoFieldValue(fields, adoFieldRefs.state)}`);
+            sections.push(`<b>Reason:</b> ${getAdoFieldValue(fields, adoFieldRefs.reason)}`);
+        }
         sections.push(`<b>Complexity:</b> ${complexity}`);
         sections.push(`<b>Acceptance Criteria:</b> ${acceptanceCriteria}`);
         sections.push(`<b>Description:</b> ${description}`);
@@ -860,7 +858,7 @@ ${marker}`;
         }
     }
 
-    async function buildDesiredRequirementState(eventData, requirementContext = null) {
+    async function buildDesiredRequirementState(eventData, requirementContext = null, options = {}) {
         const fields = getFields(eventData);
         const workItemId = eventData?.resource?.workItemId || eventData?.resource?.id;
         const warnings = [];
@@ -989,7 +987,9 @@ ${marker}`;
             workItemId,
             namePrefix,
             name: buildRequirementName(namePrefix, eventData),
-            description: buildRequirementDescription(eventData),
+            description: buildRequirementDescription(eventData, {
+                includeStatusDetails: options.includeStatusDetails === true,
+            }),
             areaPath: adoAreaPath,
             complexityValue,
             workItemTypeValue,
@@ -1082,7 +1082,6 @@ ${marker}`;
                 console.log(`[Info] Update workitem event received for 'WI${workItemId}'.`);
                 const commentChanged = hasCommentActivity(event);
                 const shouldProcessUpdate = shouldProcessRequirementUpdate(event);
-                if (!shouldProcessUpdate && !commentChanged) return;
 
                 const getRequirementResult = await getRequirementByWorkItemId(workItemId);
                 if (getRequirementResult.failed) return;
@@ -1094,6 +1093,7 @@ ${marker}`;
                 }
 
                 requirementToUpdate = getRequirementResult.requirement;
+                if (requirementToUpdate && !shouldProcessUpdate && !commentChanged) return;
                 break;
             }
 
@@ -1117,10 +1117,13 @@ ${marker}`;
                 return;
         }
 
-        const desiredState = await buildDesiredRequirementState(event, requirementToUpdate);
+        const isCreatingRequirement = !requirementToUpdate;
+        const desiredState = await buildDesiredRequirementState(event, requirementToUpdate, {
+            includeStatusDetails: isCreatingRequirement,
+        });
 
         let syncedRequirement;
-        if (requirementToUpdate) {
+        if (!isCreatingRequirement) {
             syncedRequirement = await updateRequirement(requirementToUpdate, desiredState);
         } else {
             syncedRequirement = await createRequirement(desiredState);
