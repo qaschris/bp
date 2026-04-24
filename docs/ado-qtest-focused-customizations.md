@@ -2,415 +2,624 @@
 
 ## Purpose
 
-This document is the current technical handover reference for the BP Azure DevOps and qTest integration rules in this repository.
+This document is the customer-facing technical delivery reference for the six live BP Azure DevOps and qTest integration items in this repository.
 
-It is organized by live rule and sync direction rather than by the original enhancement request list. The goal is to describe what the code does today, including the newer comment handling, the mapping overrides, the fallback rules, and the operational behaviors that matter during support and go-live.
+It is organized around the delivered items the customer asked to see, and each item includes the same decision-useful sections:
+
+- Pre-requisite
+- URLs
+- Sample Code
+- Impacts
+- How to Use
+- Outcomes
+
+This document describes the live Pulse rule behavior as it exists today. It also calls out known operational limitations where they affect support, audit review, or end-user expectations.
 
 ## Solution Context
 
 - Integration platform: qTest Pulse
 - Runtime: Node.js-based Pulse webhook rules
 - Systems in scope: Azure DevOps, qTest Manager, qTest Pulse
-- Current deployment model: live sync rules in Pulse, plus a two-rule Pulse migration workflow for pre-existing qTest requirements
-- Local reference only: `bp_requirement_migration.js` remains in the repository as a baseline, but it is no longer the deployment target
+- Delivery shape: six live integration items, plus separate migration utilities for older qTest requirements
+- Main base URLs:
+  - qTest Manager base: `ManagerURL`
+  - Azure DevOps project base: `AzDoProjectURL`
+- Shared credentials:
+  - `QTEST_TOKEN`
+  - `AZDO_TOKEN`
+- Shared support trigger:
+  - `ChatOpsEvent`
+
+## Delivered Items Summary
+
+1. `CreateDefectInAzureDevops.P1.js`
+2. `SyncDefectFromAzureDevopsWorkItem.P1.js`
+3. `UpdateDefectInAzureDevops.P1.js`
+4. `SyncRequirementFromAzureDevopsWorkItem.P1.js`
+5. `UpdateRequirementStatusInAzureDevops.P1.js`
+6. `SyncRICEFWFeatureFromAzureDevops.js`
+
+## Shared Pre-requisites
+
+- qTest Pulse access with the BP project rules deployed and enabled
+- qTest Manager project access and Azure DevOps project access
+- qTest custom fields created and their qTest field ids configured in Pulse constants
+- Azure DevOps custom fields created and their field references configured in Pulse constants
+- ADO service hooks or event sources wired so Pulse receives work item create, update, and delete events where required
+- qTest event rules wired so Pulse receives defect-update and requirement-update events where required
+- `SyncUserRegex` configured where loop prevention depends on identifying the integration service user
+- The `WI<id>:` naming convention preserved on synced records so the linked Azure DevOps work item can be recovered later
+- qTest comments API and Azure DevOps comments API available for the rules that synchronize comments
 
 ## Shared Integration Behaviors
 
-- qTest constrained dropdowns are resolved dynamically through qTest field metadata instead of relying on hardcoded option ids.
-- Friendly warnings and failures are emitted through `ChatOpsEvent` so support receives business-readable messages instead of only console output.
-- Linked qTest requirements use the `WI<id>:` naming convention so the Azure DevOps work item id can be recovered later.
-- Defects created from qTest are updated to include the linked ADO work item id in the qTest defect name after create succeeds.
+- qTest constrained dropdown values are resolved dynamically from qTest field metadata instead of relying on hardcoded numeric option ids.
+- Friendly warnings and failures are sent through `ChatOpsEvent` so support receives business-readable messages instead of only console output.
+- Defect comments are synchronized in both directions.
+- Standard Requirement and RICEFW comments currently flow one way from ADO to qTest.
 - Defect field synchronization is asynchronous across qTest, Pulse, and Azure DevOps, so short delays are expected after create and update activity.
-- The configured default ADO area path comes from `constants.AreaPath`.
-- The configured default ADO iteration path comes from `constants.IterationPath` or `constants.AzDoDefaultIterationPath`.
-- Requirement and RICEFW comments currently flow one way from ADO to qTest.
-- Defect comments currently flow both directions between ADO and qTest.
-- Comment sync relies on origin markers such as `[From ADO]` and `[From qTest]`, plus CID markers where available, to reduce echo loops and duplicates.
+- Origin markers such as `[From ADO]`, `[From qTest]`, and CID markers are used where available to reduce comment duplication and echo loops.
 
-## Rule Reference
+## Delivered Item 1
 
 ### 1. CreateDefectInAzureDevops.P1.js
 
-**Direction / Trigger**
+**Pre-requisite**
 
-- qTest to ADO
-- Triggered when a qTest defect is created in the configured BP project
-- This is the authoritative creation path for defects; ADO-created defects are not used to create new qTest defects
+- In addition to the shared pre-requisites, this rule needs the qTest defect create event for the target BP project.
+- Required qTest constants:
+  - `DefectSummaryFieldID`
+  - `DefectDescriptionFieldID`
+  - `DefectSeverityFieldID`
+  - `DefectPriorityFieldID`
+  - `DefectTypeFieldID`
+  - `DefectStatusFieldID`
+  - `DefectAffectedReleaseFieldID`
+  - `DefectCreatedByFieldID`
+  - `DefectExternalReferenceFieldID`
+  - `DefectRootCauseFieldID`
+  - `DefectAssignedToFieldID`
+  - `DefectAssignedToTeamFieldID`
+  - `DefectTargetDateFieldID`
+- Required ADO field references:
+  - `title`
+  - `reproSteps`
+  - `tags`
+  - `state`
+  - `severity`
+  - `priority`
+  - `areaPath`
+  - `assignedTo`
+  - `defectType`
+  - `bugStage`
+  - `createdBy`
+  - `externalReference`
+  - `rootCause`
+  - `proposedFix`
+  - `targetDate`
+- The Pulse trigger `qTestDefectSubmitted` must exist because the rule re-emits the event when it retries an incomplete qTest save.
 
-**Core Behavior**
+**URLs**
 
-- Reads the full qTest defect using retry logic so partially saved defects do not fail immediately.
-- Creates an ADO `Bug` and adds a hyperlink back to the originating qTest defect.
-- Updates the qTest defect name after ADO creation so the linked work item id is embedded for later sync.
-- Emits friendly warnings when a default is used or when a non-critical field could not be mapped cleanly.
+- qTest defect field metadata:
+  - `{ManagerURL}/api/v3/projects/{ProjectID}/settings/defects/fields`
+- qTest defect detail read:
+  - `{ManagerURL}/api/v3/projects/{ProjectID}/defects/{defectId}`
+- qTest user lookup:
+  - `{ManagerURL}/api/v3/users/{userId}`
+- Azure DevOps classification lookup:
+  - `{AzDoProjectURL}/_apis/wit/classificationnodes/{areas|iterations}?$depth=10&api-version=6.0`
+- Azure DevOps bug create:
+  - `{AzDoProjectURL}/_apis/wit/workitems/$Bug?api-version=6.0`
+- qTest defect summary update after successful create:
+  - `{ManagerURL}/api/v3/projects/{ProjectID}/defects/{defectId}`
 
-**ADO Fields Written**
+**Sample Code**
 
-- `System.Title`
-- `Microsoft.VSTS.TCM.ReproSteps`
-- `System.Tags`
-- `System.State`
-- `Microsoft.VSTS.Common.Severity`
-- `Microsoft.VSTS.Common.Priority`
-- `System.AreaPath`
-- `System.AssignedTo`
-- `BP.ERP.DefectType`
-- `Custom.BugStage`
-- `Custom.bpCreatedBy`
-- `BP.ERP.ExternalReference`
-- `Custom.Application`
-- `Custom.SiteName`
-- `System.IterationPath`
-- `Microsoft.VSTS.CMMI.RootCause`
-- `Microsoft.VSTS.CMMI.ProposedFix`
-- `Microsoft.VSTS.Scheduling.TargetDate`
+```
+const url = `${baseUrl}/_apis/wit/workitems/$Bug?api-version=6.0`;
+const requestBody = [
+    { op: "add", path: "/fields/System.Title", value: adoTitle },
+    { op: "add", path: "/fields/System.State", value: mappedStatus },
+    { op: "add", path: "/relations/-", value: { rel: "Hyperlink", url: qTestLink } }
+];
 
-**Mapping and Override Behavior**
+const response = await axios.post(url, requestBody, {
+    headers: {
+        "Content-Type": "application/json-patch+json",
+        "Authorization": `basic ${Buffer.from(`:${constants.AZDO_TOKEN}`).toString("base64")}`
+    }
+});
+```
 
-- qTest severity ids map to ADO severity labels `1 - Critical` through `4 - Low`.
-- qTest priority ids map to ADO priorities `1` through `4`.
-- qTest defect type ids map to the customer ADO defect type values such as `Code`, `Data`, `Infrastructure`, `User Authorization`, and `Automation`.
-- qTest status ids map to the BP ADO defect states such as `New`, `In Analysis`, `Awaiting Implementation`, `Resolved`, `Retest`, `Reopened`, `Closed`, `On Hold`, `Rejected`, and `Triage`.
-- qTest affected release values map to the BP bug stage values such as `P&O_R1_SIT1`, `P&O_R1_DC1`, `P&O_R1_UAT`, and `Unit Testing`.
-- qTest `Assigned to Team` is translated to ADO `System.AreaPath`. If the qTest value is blank or cannot be resolved, the rule defaults to `constants.AreaPath` and emits a warning.
-- qTest `Iteration Path` is matched against ADO classification nodes. If no match is found, the rule defaults to the configured iteration fallback and emits a warning.
-- qTest `Assigned To` is resolved to a usable identity before writing `System.AssignedTo`.
-- qTest `Root Cause` is written using the configured ADO field reference after label normalization rather than by qTest numeric id.
+**Impacts**
 
-**Operational Notes**
+- Creates the linked Azure DevOps `Bug` from a qTest defect.
+- Adds a backlink from the ADO bug to the originating qTest defect.
+- Updates the qTest defect name so it contains the `WI<id>:` prefix used by later sync rules.
+- Uses configured fallbacks when Area Path, Iteration Path, or assignee values cannot be resolved cleanly.
+- Intentionally does not send `Closed Date` or `Resolved Reason` during initial bug create. Those values are handled by later update flows.
 
-- The active creation path intentionally does not send `Closed Date` or `Resolved Reason` during the initial ADO bug create. Those values are handled on later update flows instead.
-- `Target Date` is sent during create when present.
-- Missing optional mapped values are usually skipped with warnings instead of causing the entire defect create to fail.
+**How to Use**
+
+- End user creates the defect in qTest and completes the save.
+- If qTest initially returns an incomplete record, the rule retries until the record has enough detail to create the ADO bug.
+- Support reviews any `ChatOpsEvent` warning when the rule had to default Area Path, Iteration Path, or assignee values.
+
+**Outcomes**
+
+- A linked ADO bug is created.
+- The qTest defect is updated with the ADO work item id for downstream synchronization.
+- The defect is ready for later two-way defect field sync and two-way comment sync.
+
+## Delivered Item 2
 
 ### 2. SyncDefectFromAzureDevopsWorkItem.P1.js
 
-**Direction / Trigger**
+**Pre-requisite**
 
-- ADO to qTest
-- Handles `workitem.updated` for linked defects
-- ADO defect create events are logged and ignored because the BP defect lifecycle starts in qTest
-- ADO defect delete events are logged and ignored; linked qTest defects are not automatically deleted
+- In addition to the shared pre-requisites, the qTest defect must already be linked through the `WI<id>:` naming convention.
+- Azure DevOps work item events must be supplied to Pulse for:
+  - `workitem.updated`
+  - `workitem.created`
+  - `workitem.deleted`
+- Required qTest constants:
+  - `DefectSummaryFieldID`
+  - `DefectDescriptionFieldID`
+  - `DefectSeverityFieldID`
+  - `DefectPriorityFieldID`
+  - `DefectTypeFieldID`
+  - `DefectStatusFieldID`
+  - `DefectRootCauseFieldID`
+  - `DefectExternalReferenceFieldID`
+  - `DefectResolvedReasonFieldID`
+  - `DefectAssignedToFieldID`
+  - `DefectAssignedToTeamFieldID`
+  - `DefectTargetDateFieldID`
+- Required ADO field references:
+  - `title`
+  - `reproSteps`
+  - `state`
+  - `severity`
+  - `priority`
+  - `defectType`
+  - `rootCause`
+  - `proposedFix`
+  - `targetDate`
+  - `externalReference`
+  - `resolvedReason`
+  - `areaPath`
+  - `assignedTo`
+- qTest project-user lookup must be available because inbound ADO assignee resolution depends on active qTest project users.
 
-**Core Behavior**
+**URLs**
 
-- Finds the linked qTest defect using the stored `WI<id>:` convention.
-- Updates the existing qTest defect with the current ADO field values.
-- Converts ADO comment activity into qTest defect comments.
-- Uses project-scoped qTest user lookup for inbound assignment handling.
+- qTest field metadata:
+  - `{ManagerURL}/api/v3/projects/{ProjectID}/settings/defects/fields`
+- qTest project users:
+  - `{ManagerURL}/api/v3/projects/{ProjectID}/users?inactive=false`
+- qTest defect search by `WI<id>`:
+  - `{ManagerURL}/api/v3/projects/{ProjectID}/search`
+- qTest defect update:
+  - `{ManagerURL}/api/v3/projects/{ProjectID}/defects/{defectId}`
+- qTest defect comments:
+  - `{ManagerURL}/api/v3/projects/{ProjectID}/defects/{defectId}/comments`
+- Azure DevOps comments:
+  - `{AzDoProjectURL}/_apis/wit/workitems/{workItemId}/comments?api-version=7.0-preview.3`
 
-**qTest Fields Updated**
+**Sample Code**
 
-- Defect title / linked name
-- Description / repro details
-- Status
-- Severity
-- Priority
-- Defect Type
-- Root Cause
-- Proposed Fix
-- External Reference
-- Resolved Reason
-- Application
-- Source Team
-- Site Name
-- Assigned To
-- Assigned to Team
-- Affected Release
-- Target Date
-- Iteration Path
-- qTest comments from ADO comments
+```
+const requestBody = {
+    properties: [
+        { field_id: constants.DefectSummaryFieldID, field_value: summary },
+        { field_id: constants.DefectDescriptionFieldID, field_value: description },
+        { field_id: constants.DefectStatusFieldID, field_value: parseInt(statusValue, 10) }
+    ]
+};
 
-**Mapping and Override Behavior**
+await put(url, requestBody);
+```
 
-- Most ADO states are used by label, but the rule explicitly overrides `Active` to qTest `In Analysis` and `Cancelled` to qTest `Rejected`.
-- ADO bug stage values such as `P&O_R1_SIT1`, `P&O_R1_DC1`, and `Unit Testing` map back to the qTest `Affected Release` dropdown values.
-- ADO severity and priority are converted back to qTest numeric option values.
-- ADO `AreaPath` is translated to qTest `Assigned to Team` through dynamic qTest field resolution.
-- If the ADO area path cannot be resolved in qTest, the rule falls back to the configured default area path label and emits a warning.
-- ADO `Assigned To` is resolved only against active users in the target qTest project.
-- If inbound user resolution fails, the rule falls back to the configured service identity behavior rather than failing the whole sync.
-- ADO `Root Cause`, `Resolved Reason`, and `Iteration Path` are resolved dynamically against qTest field options. When optional values cannot be resolved, the field is left unchanged and a warning is emitted.
-- ADO `Target Date` is converted to qTest date-time format before write.
+**Impacts**
 
-**Comment Behavior**
+- Updates the linked qTest defect from Azure DevOps field values.
+- Adds qTest comments from ADO comment activity.
+- Uses qTest dropdown resolution for inbound ADO values instead of hardcoded mappings where labels align.
+- Falls back to configured defaults for unresolved inbound assignee or team values instead of failing the whole sync.
+- Create and delete events are intentionally informational only for defects; this rule does not create new qTest defects from ADO and does not delete qTest defects from ADO delete events.
+- Current timing limitation: this inbound rule still writes mapped ADO values back to qTest on qualifying updates, so rapid successive qTest edits can still be overwritten later by stale ADO-backed callbacks.
 
-- ADO comment changes are detected through `System.CommentCount`, `System.History`, and discussion metadata.
-- qTest comments are created with a `[From ADO]` marker.
-- Duplicate ADO comments are skipped by CID-style dedupe.
-- The current live comment behavior uses the qTest comments API for user-visible comment sync.
-- `DefectDiscussionFieldID` remains an optional configured field in the defect payload and force-change path, but the main end-user comment experience is now the qTest comments stream.
+**How to Use**
 
-**Current Timing Limitation**
+- Azure DevOps user updates the linked bug.
+- Pulse receives the work item event and resolves the matching qTest defect through the `WI<id>:` prefix.
+- Support should expect comments and field updates to arrive asynchronously.
+- Current best practice is to let one defect save and sync settle before making another broad round of defect field changes in qTest.
 
-- The current inbound defect field-sync path still writes the mapped ADO state back to qTest on each qualifying defect update event.
-- It does not yet use the same desired-state no-op evaluation pattern that the standard requirement sync uses.
-- It also does not yet suppress inbound defect field sync when the ADO revision was authored by the integration sync user.
-- Because of that, rapid successive qTest defect edits can still produce stale ADO-backed callbacks that overwrite a newer qTest field value.
-- Current customer guidance is to let one defect save and sync settle before making another broad round of defect field edits.
+**Outcomes**
+
+- qTest defect fields reflect the current ADO bug values for the mapped fields.
+- ADO comments appear as qTest comments with `[From ADO]` markers.
+- Support receives friendly warnings when an inbound value could not be mapped cleanly.
+
+## Delivered Item 3
 
 ### 3. UpdateDefectInAzureDevops.P1.js
 
-**Direction / Trigger**
+**Pre-requisite**
 
-- qTest to ADO
-- Triggered by qTest defect update events on linked defects
+- In addition to the shared pre-requisites, the qTest defect must already contain the linked `WI<id>` reference.
+- qTest defect update events must be enabled in Pulse for the target project.
+- Required qTest constants:
+  - `DefectSummaryFieldID`
+  - `DefectDescriptionFieldID`
+  - `DefectSeverityFieldID`
+  - `DefectPriorityFieldID`
+  - `DefectTypeFieldID`
+  - `DefectStatusFieldID`
+  - `DefectAffectedReleaseFieldID`
+  - `DefectExternalReferenceFieldID`
+  - `DefectRootCauseFieldID`
+  - `DefectAssignedToFieldID`
+  - `DefectAssignedToTeamFieldID`
+  - `DefectTargetDateFieldID`
+- Required ADO field references:
+  - `title`
+  - `reproSteps`
+  - `state`
+  - `severity`
+  - `priority`
+  - `defectType`
+  - `externalReference`
+  - `bugStage`
+  - `rootCause`
+  - `proposedFix`
+  - `resolvedReason`
+  - `areaPath`
+  - `assignedTo`
+  - `targetDate`
+- `SyncUserRegex` is strongly recommended because this rule already uses it to skip qTest updates made by the integration user and prevent echo loops.
 
-**Core Behavior**
+**URLs**
 
-- Reads the linked ADO work item from the qTest defect name.
-- Syncs qTest comments to the ADO work item comments API before deciding whether a field patch is needed.
-- Applies only the field changes that actually differ from the current ADO work item values.
-- Uses classification path resolution for outbound area path and iteration path writes.
+- qTest defect read:
+  - `{ManagerURL}/api/v3/projects/{ProjectID}/defects/{defectId}`
+- qTest user lookup:
+  - `{ManagerURL}/api/v3/users/{userId}`
+- qTest comments:
+  - `{ManagerURL}/api/v3/projects/{ProjectID}/defects/{defectId}/comments`
+- Azure DevOps work item read:
+  - `{AzDoProjectURL}/_apis/wit/workitems/{workItemId}?api-version=6.0&$expand=Relations`
+- Azure DevOps comments:
+  - `{AzDoProjectURL}/_apis/wit/workItems/{workItemId}/comments?api-version=6.0-preview.3`
+- Azure DevOps work item patch:
+  - `{AzDoProjectURL}/_apis/wit/workitems/{workItemId}?api-version=6.0`
 
-**ADO Fields Updated**
+**Sample Code**
 
-- `System.Title`
-- `Microsoft.VSTS.TCM.ReproSteps`
-- `Microsoft.VSTS.Common.Severity`
-- `Microsoft.VSTS.Common.Priority`
-- `System.State`
-- `BP.ERP.DefectType`
-- `Microsoft.VSTS.CMMI.RootCause`
-- `Microsoft.VSTS.CMMI.ProposedFix`
-- `Microsoft.VSTS.Common.ResolvedReason`
-- `Custom.Application`
-- `Custom.Source_Team`
-- `Custom.SiteName`
-- `System.AreaPath`
-- `System.AssignedTo`
-- `Custom.BugStage`
-- `Microsoft.VSTS.Scheduling.TargetDate`
-- `System.IterationPath`
-- ADO work item comments
+```
+const patchData = [];
 
-**Mapping and Override Behavior**
+if (adoTitle && curTitle !== adoTitle) {
+    patchData.push(buildFieldPatchOperation(adoFieldRefs.title, adoTitle));
+}
 
-- Outbound status mapping is label-aware first, then falls back to qTest status ids.
-- The current outbound status map explicitly includes qTest status label `Active` to ADO state `Active`.
-- qTest affected release values map back to BP bug stage values such as `P&O_R1_SIT1`, `P&O_R1_DC1`, and `P&O_R1_UAT`.
-- qTest `Assigned to Team` is translated to ADO `System.AreaPath`; if the qTest value is blank or cannot be resolved, the rule defaults to `constants.AreaPath` and emits a warning.
-- qTest `Iteration Path` is resolved against the live ADO classification tree; if no match is found, the rule uses the configured iteration fallback and emits a warning.
-- qTest `Assigned To` is translated to a usable ADO identity when possible; a default service identity path is available when it cannot be resolved.
-- qTest `Root Cause` is normalized before being written to the configured ADO picklist field.
-- `Resolved Reason` is intentionally not written when the outbound ADO state is `New` or `Active`.
-- If qTest `Resolved Reason` is blank and the ADO state is not locked, the rule clears the ADO resolved reason field.
-- qTest descriptions are sanitized to remove the embedded ADO link block before the description is pushed back into ADO.
+if (patchData.length === 0) {
+    console.log("[Info] No ADO changes detected; skipping patch (prevents loops).");
+    return;
+}
 
-**Comment Behavior**
+await axios.patch(adoPatchUrl, patchData, {
+    headers: {
+        Authorization: `Basic ${encodedToken}`,
+        "Content-Type": "application/json-patch+json"
+    }
+});
+```
 
-- qTest defect comments are posted to the ADO work item comments API.
-- Outbound comments are formatted with `[From qTest]`.
-- CID markers are used when possible so duplicate outbound comment posts can be skipped.
-- Comments are synced even when no field-level patch is required, so comment-only qTest activity is not lost.
-- If `DefectDiscussionFieldID` is configured, the rule writes a timestamp back to qTest after outbound comment sync to force downstream change detection.
+**Impacts**
 
-**Operational Notes**
+- Updates only the changed ADO fields instead of rewriting the full work item.
+- Synchronizes qTest defect comments to ADO comments even when no field patch is needed.
+- Skips qTest updates made by the integration user when `SyncUserRegex` matches.
+- Suppresses no-op ADO field patches, which reduces unnecessary audit noise on the ADO side.
+- Sanitizes qTest descriptions before writing them back into ADO so embedded link text does not keep growing.
 
-- The outbound defect path already skips qTest updates from the configured sync user and suppresses no-op ADO field patches.
-- Those outbound protections reduce echo churn, but they do not fully eliminate stale inbound ADO callbacks until the inbound defect path is hardened as well.
+**How to Use**
+
+- End user edits a linked defect in qTest.
+- The rule reads the current qTest defect, extracts the linked ADO work item id, reads the current ADO work item, and patches only the changed fields.
+- If qTest comments were added, they are pushed to the ADO comments API even when no other field changed.
+- Support should review warnings when assignee, Area Path, or Iteration Path values are defaulted.
+
+**Outcomes**
+
+- Linked ADO bug fields stay aligned to the qTest defect for the mapped outbound fields.
+- qTest-origin comments appear in ADO with `[From qTest]` markers.
+- Outbound defect sync already has better loop protection than the inbound defect field path because it skips sync-user changes and skips no-op patches.
+
+## Delivered Item 4
 
 ### 4. SyncRequirementFromAzureDevopsWorkItem.P1.js
 
-**Direction / Trigger**
+**Pre-requisite**
 
-- ADO to qTest
-- Handles requirement create, update, comment-only update, and delete flows
+- In addition to the shared pre-requisites, Azure DevOps standard Requirement work item events must be supplied to Pulse.
+- Required qTest constants:
+  - `RequirementDescriptionFieldID`
+  - `RequirementStreamSquadFieldID`
+  - `RequirementComplexityFieldID`
+  - `RequirementWorkItemTypeFieldID`
+  - `RequirementPriorityFieldID`
+  - `RequirementTypeFieldID`
+  - `RequirementAssignedToFieldID`
+  - `RequirementIterationPathFieldID`
+- Optional but supported qTest constants:
+  - `RequirementApplicationNameFieldID`
+  - `RequirementFitGapFieldID`
+  - `RequirementBPEntityFieldID`
+  - `RequirementParentID`
+- Required ADO field references:
+  - `title`
+  - `workItemType`
+  - `areaPath`
+  - `iterationPath`
+  - `assignedTo`
+  - `description`
+  - `acceptanceCriteria`
+  - `priority`
+  - `complexity`
+  - `requirementCategory`
+  - optional when those source fields are used:
+    - `applicationName`
+    - `fitGap`
+    - `entity`
 
-**Core Behavior**
+**URLs**
 
-- Creates or updates qTest requirements under the correct qTest module path.
-- Deletes the linked qTest requirement when the ADO work item is deleted.
-- Prevents most field-loop churn by processing only relevant updated fields on normal update events.
-- Allows comment-only ADO updates to run even when no synced requirement field changed.
-- Creates missing qTest modules on demand.
+- qTest requirement field metadata:
+  - `{ManagerURL}/api/v3/projects/{ProjectID}/settings/requirements/fields`
+- qTest module tree read:
+  - `{ManagerURL}/api/v3/projects/{ProjectID}/modules/{parentId}?expand=descendants`
+- qTest module create:
+  - `{ManagerURL}/api/v3/projects/{ProjectID}/modules`
+- qTest requirement search:
+  - `{ManagerURL}/api/v3/projects/{ProjectID}/search`
+- qTest requirement create:
+  - `{ManagerURL}/api/v3/projects/{ProjectID}/requirements`
+- qTest requirement update:
+  - `{ManagerURL}/api/v3/projects/{ProjectID}/requirements/{requirementId}`
+- qTest requirement comments:
+  - `{ManagerURL}/api/v3/projects/{ProjectID}/requirements/{requirementId}/comments`
+- Azure DevOps work item comments:
+  - `{AzDoProjectURL}/_apis/wit/workItems/{workItemId}/comments?api-version=7.0-preview.3`
 
-**Module Placement Behavior**
+**Sample Code**
 
-- The root for standard requirements is `RequirementParentID`.
-- The release folder is derived from `System.IterationPath`, using the `P&O Release <number>` naming convention where available.
-- Additional module levels are derived from the ADO `AreaPath`.
-- The requirement is moved only when the computed target module differs from its current qTest parent.
+```
+const evaluation = evaluateRequirementUpdate(requirementDetails, desiredState);
 
-**qTest Fields Updated**
+if (!evaluation.needsUpdate) {
+    console.log(`[Info] Requirement '${requirementToUpdate.id}' is already in sync. Skipping update.`);
+    return requirementDetails;
+}
 
-- Requirement name using the `WI<id>:` prefix
-- Requirement description
-- Stream / Squad from ADO area path
-- Complexity
-- Work Item Type
-- Priority
-- Requirement Category
-- Assigned To as normalized text
-- Iteration Path
-- Application Name
-- Fit Gap
-- BP Entity
-- qTest comments copied from ADO comments
+const updated = await put(url, evaluation.requestBody);
+```
 
-**Description Behavior**
+**Impacts**
 
-- The qTest description includes an ADO hyperlink plus a structured snapshot of ADO metadata.
-- The current description block includes Type, Area, Iteration, State, Reason, Complexity, Acceptance Criteria, and Description.
-- Acceptance Criteria is embedded inside the description block in the standard requirement rule rather than being written to a separate qTest acceptance-criteria property.
+- Creates, updates, or deletes the matching qTest Requirement for standard ADO Requirement items.
+- Builds the qTest module path from release plus ADO Area Path.
+- Creates missing qTest modules when required.
+- Uses desired-state comparison so no-op ADO events do not rewrite qTest unnecessarily.
+- Supports comment-only ADO updates and keeps requirement comments flowing from ADO to qTest.
+- Optional fields such as Application Name, Fit Gap, and BP Entity are left unchanged with warnings if their qTest field ids are not configured or their values cannot be resolved.
 
-**Mapping and Override Behavior**
+**How to Use**
 
-- Complexity, Work Item Type, Priority, Requirement Category, Iteration Path, Application Name, Fit Gap, and BP Entity are resolved dynamically against qTest fields.
-- Optional fields that cannot be resolved are left unchanged and reported as warnings rather than failing the whole requirement sync.
-- `Assigned To` is currently stored as normalized display text in qTest. The standard requirement rule does not currently resolve the user to a qTest project user id.
-- The rule compares the full desired state to the current qTest requirement before writing, so no-op ADO updates do not rewrite qTest unnecessarily.
+- Azure DevOps Requirement is created, updated, or deleted.
+- Pulse uses the work item event payload to build the desired qTest state, find or create the correct module path, and compare the desired state with the current qTest requirement.
+- If nothing changed, the rule exits cleanly without rewriting qTest.
+- If the item is new, the rule creates it under `RequirementParentID`.
 
-**Comment Behavior**
+**Outcomes**
 
-- Requirement comments currently flow one way from ADO to qTest.
-- The rule reads ADO comments from the work item comments API.
-- qTest comments are created or updated with a `[From ADO]` prefix and a `[CID:<ADO comment id>]` marker.
-- Comment-only ADO events are supported.
+- qTest Requirement records are created and maintained from Azure DevOps as the source of truth.
+- The qTest requirement description contains the ADO link plus a structured snapshot of the ADO content.
+- Requirement comments appear in qTest with `[From ADO]` and `[CID:<comment id>]` markers.
+
+## Delivered Item 5
 
 ### 5. UpdateRequirementStatusInAzureDevops.P1.js
 
-**Direction / Trigger**
+**Pre-requisite**
 
-- qTest to ADO
-- Triggered by qTest requirement update events when the qTest status field changed
+- In addition to the shared pre-requisites, this item needs qTest requirement update events for the target project.
+- Required constants:
+  - `ProjectID`
+  - `RequirementStatusFieldID`
+  - `AzDoTestingStatusFieldRef`
+  - `AZDO_TOKEN`
+  - `ManagerURL`
+  - `AzDoProjectURL`
+  - `QTEST_TOKEN`
+- `SyncUserRegex` is recommended because the rule uses it to skip qTest updates made by the integration user.
+- The qTest requirement must already contain the linked `WI<id>` reference so the ADO work item can be identified.
 
-**Core Behavior**
+**URLs**
 
-- This is a narrow bridge rule, not a full requirement field sync.
-- It reads the linked ADO work item id from the qTest requirement name.
-- It updates only the configured ADO testing-status field.
-- It skips work when the current ADO testing status already matches the qTest value.
+- qTest requirement read:
+  - `{ManagerURL}/api/v3/projects/{ProjectID}/requirements/{requirementId}`
+- Azure DevOps work item read:
+  - `{AzDoProjectURL}/_apis/wit/workitems/{workItemId}?api-version=6.0`
+- Azure DevOps work item patch:
+  - `{AzDoProjectURL}/_apis/wit/workitems/{workItemId}?api-version=6.0`
 
-**Status Handling**
+**Sample Code**
 
-- The qTest source field is `RequirementStatusFieldID`.
-- The destination field is `AzDoTestingStatusFieldRef`.
-- The rule currently recognizes the BP testing status values represented by the configured ids and labels such as `SIT Dry Run In Progress`, `SIT Dry Run Complete`, `SIT 1 In Progress`, `SIT 1 Complete`, `SIT 2 In Progress`, `SIT 2 Complete`, `UAT In Progress`, and `UAT Complete`.
-- If the mapped value is `New`, the rule intentionally skips the ADO update by design.
+```
+const requestBody = [
+    {
+        op: "add",
+        path: `/fields/${adoTestingStatusFieldRef}`,
+        value: adoStatus
+    }
+];
 
-**Loop Prevention**
+await axios.patch(adoUrl, requestBody, {
+    headers: {
+        "Content-Type": "application/json-patch+json",
+        Authorization: `basic ${Buffer.from(`:${adoToken}`).toString("base64")}`
+    }
+});
+```
 
-- If the qTest event does not reference the configured status field id, the rule exits.
-- If the qTest updater matches `SyncUserRegex`, the rule exits to avoid integration loops.
+**Impacts**
+
+- Updates only one ADO field: the configured Testing Status field.
+- Does not attempt full Requirement field synchronization from qTest back into ADO.
+- Skips no-op patches when the ADO testing status already matches.
+- Skips events when the changed qTest field set does not include the configured status field id.
+
+**How to Use**
+
+- qTest user changes the configured requirement status field.
+- Pulse reads the linked qTest Requirement, derives the linked ADO work item id from the `WI<id>` name, reads the current ADO status, and patches ADO only when the value changed.
+- Support should use this rule only for the agreed BP testing status process, not as a general-purpose Requirement update bridge.
+
+**Outcomes**
+
+- The ADO testing status field is kept aligned with the qTest requirement status process.
+- The rule avoids broad side effects because it is intentionally narrow.
+- Audit noise is limited because unchanged statuses are not repatched.
+
+## Delivered Item 6
 
 ### 6. SyncRICEFWFeatureFromAzureDevops.js
 
-**Direction / Trigger**
+**Pre-requisite**
 
-- ADO to qTest
-- Handles feature create, update, comment-only update, and delete flows for qualifying RICEFW items
+- In addition to the shared pre-requisites, Azure DevOps Feature work item events must be supplied to Pulse.
+- Required qTest constants:
+  - `RequirementDescriptionFieldID`
+  - `RequirementStreamSquadFieldID`
+  - `RequirementWorkItemTypeFieldID`
+  - `RequirementAssignedToFieldID`
+  - `RequirementIterationPathFieldID`
+  - `RequirementRICEFWConfigurationFieldID`
+  - `FeatureParentID`
+- Additional supported qTest constants used when configured:
+  - `RequirementStateFieldID`
+  - `RequirementReasonFieldID`
+  - `RequirementAcceptanceCriteriaFieldID`
+  - `RequirementComplexityFieldID`
+  - `RequirementPriorityFieldID`
+  - `RequirementTypeFieldID`
+  - `RequirementTestingStatusFieldID`
+- Required ADO field references:
+  - `title`
+  - `workItemType`
+  - `areaPath`
+  - `iterationPath`
+  - `state`
+  - `reason`
+  - `assignedTo`
+  - `description`
+  - `acceptanceCriteria`
+  - `priority`
+  - `complexity`
+  - `ricefwId`
+  - `featureType`
+  - `ricefwConfiguration`
+- Qualification rule:
+  - Work Item Type must be `Feature`
+  - Feature Type must be `RICEFW` or `Change Request`
+  - RICEFW Configuration must be one of `Enhancement`, `Form`, `Interface`, `Report`, or `Workflow`
+  - State must not be `Rejected` or `Cancelled`
 
-**Qualification Rules**
+**URLs**
 
-- ADO work item type must be `Feature`.
-- The BP feature type must be `RICEFW` or `Change Request`.
-- The configured RICEFW classification must be one of `Enhancement`, `Form`, `Interface`, `Report`, or `Workflow`.
-- The ADO work item state must not be `Rejected` or `Cancelled`.
+- qTest requirement field metadata:
+  - `{ManagerURL}/api/v3/projects/{ProjectID}/settings/requirements/fields`
+- qTest module tree read:
+  - `{ManagerURL}/api/v3/projects/{ProjectID}/modules/{parentId}?expand=descendants`
+- qTest module create:
+  - `{ManagerURL}/api/v3/projects/{ProjectID}/modules`
+- qTest requirement search:
+  - `{ManagerURL}/api/v3/projects/{ProjectID}/search`
+- qTest requirement create:
+  - `{ManagerURL}/api/v3/projects/{ProjectID}/requirements`
+- qTest requirement update:
+  - `{ManagerURL}/api/v3/projects/{ProjectID}/requirements/{requirementId}`
+- qTest requirement delete:
+  - `{ManagerURL}/api/v3/projects/{ProjectID}/requirements/{requirementId}`
+- qTest requirement comments:
+  - `{ManagerURL}/api/v3/projects/{ProjectID}/requirements/{requirementId}/comments`
+- Azure DevOps work item comments:
+  - `{AzDoProjectURL}/_apis/wit/workItems/{workItemId}/comments?api-version=7.0-preview.3`
 
-**Core Behavior**
+**Sample Code**
 
-- Creates or updates a qTest requirement under the configured `FeatureParentID`.
-- Builds the module tree from the release folder plus the ADO area path.
-- Deletes the linked qTest requirement when the ADO feature is deleted.
-- If an existing linked item no longer qualifies as a RICEFW feature during an update, the rule leaves the qTest record unchanged and emits a warning instead of silently deleting or repurposing it.
+```
+const isRicefwFeature =
+    workItemType.toLowerCase() === "feature" &&
+    (featureType.toLowerCase() === "ricefw" || featureType.toLowerCase() === "change request") &&
+    (
+        ricefwConfiguration.toLowerCase() === "enhancement" ||
+        ricefwConfiguration.toLowerCase() === "form" ||
+        ricefwConfiguration.toLowerCase() === "interface" ||
+        ricefwConfiguration.toLowerCase() === "report" ||
+        ricefwConfiguration.toLowerCase() === "workflow"
+    ) &&
+    (featureState.toLowerCase() !== "rejected" && featureState.toLowerCase() !== "cancelled");
+```
 
-**qTest Fields Updated**
+**Impacts**
 
-- Requirement name using the `WI<id>:` prefix
-- Requirement description
-- Stream / Squad from ADO area path
-- Work Item Type forced to `Feature`
-- Assigned To as normalized text
-- State
-- Reason
-- Acceptance Criteria
-- Complexity
-- Priority
-- Requirement Category from the ADO feature type
-- Iteration Path
-- RICEFW Configuration
-- Testing Status
-- qTest comments copied from ADO comments
+- Creates, updates, or deletes qTest requirements for qualifying RICEFW or Change Request features in ADO.
+- Builds module placement under `FeatureParentID` from release plus ADO Area Path.
+- Synchronizes one-way comments from ADO to qTest.
+- Uses no-op evaluation so unchanged ADO events do not keep rewriting qTest.
+- If an already-synced item later falls out of scope, the rule leaves the existing qTest item unchanged and emits a warning instead of silently deleting or repurposing it.
 
-**Description Behavior**
+**How to Use**
 
-- The qTest description includes the ADO hyperlink plus Type, Area Path, Iteration, State, Reason, RICEFW ID, Acceptance Criteria, and Description.
-- The current live rule includes `RICEFW ID` inside the description block.
-- The current live rule does not create separate qTest property writes for `RICEFW ID` or `Process Release`.
+- ADO Feature is created, updated, or deleted.
+- Pulse first checks whether the work item still qualifies as a RICEFW item under the configured business rules.
+- If it qualifies, the rule creates or updates the qTest requirement under the RICEFW root.
+- If it no longer qualifies and a qTest item already exists, support receives a warning and the qTest item is left unchanged pending business decision.
 
-**Mapping and Override Behavior**
+**Outcomes**
 
-- Required qTest dropdown properties are dynamically resolved from labels rather than hardcoded numeric ids.
-- Optional values that cannot be resolved are left unchanged with warnings.
-- `Assigned To` is currently stored as normalized text in qTest, not resolved to a qTest project user id.
-- Comment-only ADO updates are allowed to run even when no other synced field changed.
+- qTest receives dedicated RICEFW requirements only for qualified feature items.
+- The description block contains the ADO link plus RICEFW-specific details such as RICEFW ID, State, Reason, Acceptance Criteria, and Description.
+- Comment synchronization for RICEFW follows the same `[From ADO]` and CID approach as the standard Requirement rule.
 
-**Comment Behavior**
+## Known Operational Notes
 
-- RICEFW comments currently flow one way from ADO to qTest.
-- The rule uses the same `[From ADO]` and `[CID:<ADO comment id>]` pattern as the standard requirement rule.
+- Defect create and update processing is asynchronous across qTest, Pulse, and ADO. A short delay between user action and downstream visibility is normal.
+- The current stale-update risk is concentrated in the inbound defect field-sync rule because it does not yet apply the same no-op evaluation pattern already used by the standard Requirement and RICEFW rules.
+- The outbound defect update rule already provides stronger loop protection because it skips qTest changes made by the sync user and suppresses no-op ADO patches.
+- Requirement and RICEFW flows are currently more mature on no-op detection than the defect inbound field-sync path.
 
-### 7. QueueRequirementMigration.P1.js
+## Appendix A
 
-**Direction / Trigger**
+### Internal Utilities Not Counted in the Six Delivered Items
 
-- Pulse internal workflow
-- Manual kickoff or chained queue execution
+- `QueueRequirementMigration.P1.js`
+- `ProcessRequirementMigrationBatch.P1.js`
 
-**Core Behavior**
+These two Pulse rules support one-time migration of older qTest Requirements into the newer release-and-area-based module structure. They are operational support utilities rather than part of the six live customer-facing integration items listed above.
 
-- Starts a requirement migration run by reading existing qTest requirements under a supplied source parent.
-- Can also run in single-item test mode using an explicit requirement id.
-- Splits the source requirements into batches and invokes the worker rule for each batch.
-- Re-invokes itself for additional pages when the source root contains more items.
+## Appendix B
 
-**Kickoff Inputs**
+### Expected Customer-Facing Outcomes Across the Full Delivery
 
-- `sourceParentId`
-- `targetParentId` or fallback to `RequirementParentID`
-- `singleRequirementId`
-- `page`
-- `pageSize`
-- `batchSize`
-- `runId`
-
-**Operational Notes**
-
-- The queue rule name is `QueueRequirementMigration.P1`.
-- The worker rule name is `ProcessRequirementMigrationBatch.P1`.
-- Friendly informational progress messages are emitted through `ChatOpsEvent`.
-
-### 8. ProcessRequirementMigrationBatch.P1.js
-
-**Direction / Trigger**
-
-- Pulse internal workflow
-- Invoked by the queue rule with one batch of qTest requirement ids
-
-**Core Behavior**
-
-- Reads each qTest requirement in the batch.
-- Extracts the linked ADO work item id from the qTest requirement name.
-- Reads the live ADO work item and rebuilds the desired qTest state using the same field and module rules as the live standard requirement sync.
-- Updates only requirements that are actually out of sync.
-- Requeues remaining ids if the worker approaches its runtime budget.
-
-**Field and Module Behavior**
-
-- Uses the same description format, field set, dynamic dropdown resolution, and module-placement rules as the standard requirement sync.
-- Moves the requirement only when the computed target parent differs from the current qTest parent.
-- Leaves optional unresolved constrained fields unchanged and emits warnings rather than failing the entire run.
-
-**Runtime Controls**
-
-- Default `maxRunMs` is 240000.
-- Remaining ids are requeued with `continuationCount + 1` when the worker yields.
-
-## Current Codebase Notes
-
-- The live requirement and RICEFW rules now include ADO to qTest comment sync.
-- The live defect rules now include two-way comment sync between qTest and ADO.
-- The live defect creation rule intentionally suppresses `Closed Date` and `Resolved Reason` during initial ADO bug create.
-- The live standard requirement rule still stores `Assigned To` as normalized text rather than resolving it to a qTest project user id.
-- The migration path now lives in Pulse rules; the standalone migration script remains only as a local reference.
+- Defects start in qTest and are represented in Azure DevOps as linked Bugs.
+- Linked defect comments move in both directions.
+- Standard Requirements and qualified RICEFW items start in Azure DevOps and are represented in qTest as linked Requirements.
+- Requirement comments and RICEFW comments currently move from ADO to qTest.
+- qTest requirement status can update the agreed ADO testing status field without opening a full reverse Requirement sync.
+- Friendly support warnings are available through `ChatOpsEvent` whenever the integration uses a default, skips an optional unresolved field, or hits a recoverable issue.
