@@ -9,6 +9,7 @@ It is intentionally less technical than the support handover document. The focus
 ## What Users Should Expect Overall
 
 - Defects are created in qTest first and then pushed into Azure DevOps.
+- Defect field sync between qTest and Azure DevOps is asynchronous, so short delays are normal after create and update activity.
 - Standard requirements and RICEFW features start in Azure DevOps and are created or updated in qTest from there.
 - Requirement comments currently flow from ADO to qTest only.
 - Defect comments currently flow both directions.
@@ -46,6 +47,7 @@ It is intentionally less technical than the support handover document. The focus
 - If `Assigned to Team` is blank or does not match a valid ADO area path, the integration uses the configured default area path and logs a warning.
 - If the qTest iteration path does not match a valid ADO iteration path, the integration uses the configured default iteration path and logs a warning.
 - `Closed Date` and `Resolved Reason` are not part of the initial create into ADO. Those fields are handled later through update flows.
+- After creating a defect, allow the initial sync to finish before making several more field edits. The linked ADO bug creation and the qTest link-back update do not complete instantly.
 
 ## 2. Azure DevOps Defect Updates Back to qTest
 
@@ -81,6 +83,9 @@ It is intentionally less technical than the support handover document. The focus
 - ADO `Active` is treated as qTest `In Analysis`.
 - ADO `Cancelled` is treated as qTest `Rejected`.
 - If an inbound dropdown value cannot be resolved in qTest, that field is skipped and a warning is logged instead of breaking the whole sync.
+- Rapid consecutive defect field updates can still be processed out of order because the integration is asynchronous across qTest, Pulse, and ADO.
+- Best practice is to let one defect save and sync settle before making another broad round of defect field changes.
+- If several defect changes are made in quick succession, an older ADO-backed update can overwrite a newer qTest field value. Reapplying the intended final change after the sync settles is the current workaround.
 
 ## 3. Defect Comments
 
@@ -217,5 +222,6 @@ It is intentionally less technical than the support handover document. The focus
 - New defects are expected to start in qTest, not in ADO.
 - Requirement and RICEFW comments are one-way from ADO to qTest.
 - Defect comments are two-way.
+- Rapid successive defect field edits are the main current source of stale-update race conditions on linked defects.
 - Standard requirement `Assigned To` and RICEFW `Assigned To` are currently stored as text in qTest rather than as qTest user assignment objects.
 - If an area path, iteration path, or optional dropdown value cannot be matched, the integration prefers a warning and a safe fallback over a hard failure whenever that is practical.

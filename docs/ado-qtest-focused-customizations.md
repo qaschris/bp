@@ -20,6 +20,7 @@ It is organized by live rule and sync direction rather than by the original enha
 - Friendly warnings and failures are emitted through `ChatOpsEvent` so support receives business-readable messages instead of only console output.
 - Linked qTest requirements use the `WI<id>:` naming convention so the Azure DevOps work item id can be recovered later.
 - Defects created from qTest are updated to include the linked ADO work item id in the qTest defect name after create succeeds.
+- Defect field synchronization is asynchronous across qTest, Pulse, and Azure DevOps, so short delays are expected after create and update activity.
 - The configured default ADO area path comes from `constants.AreaPath`.
 - The configured default ADO iteration path comes from `constants.IterationPath` or `constants.AzDoDefaultIterationPath`.
 - Requirement and RICEFW comments currently flow one way from ADO to qTest.
@@ -140,6 +141,14 @@ It is organized by live rule and sync direction rather than by the original enha
 - The current live comment behavior uses the qTest comments API for user-visible comment sync.
 - `DefectDiscussionFieldID` remains an optional configured field in the defect payload and force-change path, but the main end-user comment experience is now the qTest comments stream.
 
+**Current Timing Limitation**
+
+- The current inbound defect field-sync path still writes the mapped ADO state back to qTest on each qualifying defect update event.
+- It does not yet use the same desired-state no-op evaluation pattern that the standard requirement sync uses.
+- It also does not yet suppress inbound defect field sync when the ADO revision was authored by the integration sync user.
+- Because of that, rapid successive qTest defect edits can still produce stale ADO-backed callbacks that overwrite a newer qTest field value.
+- Current customer guidance is to let one defect save and sync settle before making another broad round of defect field edits.
+
 ### 3. UpdateDefectInAzureDevops.P1.js
 
 **Direction / Trigger**
@@ -195,6 +204,11 @@ It is organized by live rule and sync direction rather than by the original enha
 - CID markers are used when possible so duplicate outbound comment posts can be skipped.
 - Comments are synced even when no field-level patch is required, so comment-only qTest activity is not lost.
 - If `DefectDiscussionFieldID` is configured, the rule writes a timestamp back to qTest after outbound comment sync to force downstream change detection.
+
+**Operational Notes**
+
+- The outbound defect path already skips qTest updates from the configured sync user and suppresses no-op ADO field patches.
+- Those outbound protections reduce echo churn, but they do not fully eliminate stale inbound ADO callbacks until the inbound defect path is hardened as well.
 
 ### 4. SyncRequirementFromAzureDevopsWorkItem.P1.js
 
