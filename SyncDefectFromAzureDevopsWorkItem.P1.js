@@ -45,6 +45,16 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         return normalizeText(value).replace(/\s+/g, " ").toLowerCase();
     }
 
+    function firstNonEmpty(...values) {
+        for (const value of values) {
+            if (value !== undefined && value !== null && value !== "") {
+                return value;
+            }
+        }
+
+        return "";
+    }
+
     function normalizeFieldResponse(data) {
         if (Array.isArray(data)) return data;
         if (Array.isArray(data?.items)) return data.items;
@@ -242,6 +252,15 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         return fieldDefinition?.id ?? null;
     }
 
+    async function getDefectFieldDefinitionById(fieldId) {
+        if (!fieldId) {
+            return null;
+        }
+
+        const fields = await getFieldDefinitions("defects");
+        return fields.find(field => String(field?.id) === String(fieldId)) || null;
+    }
+
     function buildAdoFieldRefs() {
         return {
             title: normalizeText(constants.AzDoTitleFieldRef),
@@ -279,6 +298,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             "DefectAssignedToFieldID",
             "DefectAssignedToTeamFieldID",
             "DefectTargetDateFieldID",
+            "DefectWorkItemTagFieldID",
         ].filter(name => !normalizeText(constants[name]));
 
         if (missingQtestConstants.length) {
@@ -423,17 +443,71 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         return reproSteps;
     }
 
-    function buildDefectSummary(namePrefix, eventData) {
+    function buildDefectSummary(eventData) {
         const fields = getFields(eventData);
-        return `${namePrefix}${getAdoFieldValue(fields, adoFieldRefs.title)}`;
+        return getAdoFieldValue(fields, adoFieldRefs.title);
     }
 
     function getFields(eventData) {
         return eventData.resource.revision ? eventData.resource.revision.fields : eventData.resource.fields;
     }
 
-    function getNamePrefix(workItemId) {
+    function getWorkItemTag(workItemId) {
+        return `WI${workItemId}`;
+    }
+
+    function getLegacySummaryPrefix(workItemId) {
         return `WI${workItemId}: `;
+    }
+
+    function getAdoRevisionActorCandidates(eventData) {
+        const revisedBy = eventData?.resource?.revisedBy;
+        const candidates = [
+            revisedBy?.displayName,
+            revisedBy?.uniqueName,
+            revisedBy?.mail,
+            revisedBy?.email,
+            revisedBy?.userPrincipalName,
+            revisedBy?.descriptor,
+        ];
+
+        return candidates
+            .map(candidate => normalizeText(candidate))
+            .filter(Boolean);
+    }
+
+    function getAdoRevisionActorLabel(eventData) {
+        return firstNonEmpty(...getAdoRevisionActorCandidates(eventData), "Unknown");
+    }
+
+    function isAdoRevisionFromSyncUser(eventData) {
+        if (!constants.SyncUserRegex) {
+            return false;
+        }
+
+        const regex = new RegExp(constants.SyncUserRegex, "i");
+        return getAdoRevisionActorCandidates(eventData).some(candidate => regex.test(candidate));
+    }
+
+    function getPropertyById(obj, fieldId) {
+        const properties = Array.isArray(obj?.properties) ? obj.properties : [];
+        return properties.find(property => String(property?.field_id) === String(fieldId)) || null;
+    }
+
+    function valuesEqual(left, right) {
+        const normalizeValue = value => {
+            if (value === undefined || value === null || value === "") {
+                return "";
+            }
+
+            if (typeof value === "number" || typeof value === "boolean") {
+                return String(value);
+            }
+
+            return normalizeText(value).replace(/\s+/g, " ");
+        };
+
+        return normalizeValue(left) === normalizeValue(right);
     }
 
     function htmlToPlainText(htmlText) {
@@ -704,16 +778,15 @@ ${clean}`;
         }
     }
 
-    async function getDefectByWorkItemId(workItemId) {
-        const prefix = getNamePrefix(workItemId);
+    async function searchDefects(query, description, objectIdForErrors) {
         const url = `https://${constants.ManagerURL}/api/v3/projects/${constants.ProjectID}/search`;
         const requestBody = {
             object_type: "defects",
             fields: ["*"],
-            query: `Summary ~ '${prefix}'`,
+            query,
         };
 
-        console.log(`[Info] Get existing defect for 'WI${workItemId}'`);
+        console.log(`[Info] Searching defects by ${description}.`);
         let failed = false;
         let defect = undefined;
 
@@ -721,26 +794,26 @@ ${clean}`;
             const response = await post(url, requestBody);
 
             if (!response || response.total === 0) {
-                console.log("[Info] Defect not found by work item id.");
+                console.log(`[Info] No defect found by ${description}.`);
             } else if (response.total === 1) {
                 defect = response.items[0];
             } else {
                 failed = true;
-                console.log("[Warn] Multiple Defects found by work item id.");
+                console.log(`[Warn] Multiple defects found by ${description}.`);
                 emitFriendlyFailure({
                     platform: "qTest",
                     objectType: "Defect",
-                    objectId: workItemId,
-                    detail: "Multiple matching qTest defects were found for this Azure DevOps work item."
+                    objectId: objectIdForErrors,
+                    detail: `Multiple matching qTest defects were found by ${description}.`
                 });
             }
         } catch (error) {
-            console.error("[Error] Failed to get defect by work item id.", error);
+            console.error(`[Error] Failed to search defects by ${description}.`, error);
             emitFriendlyFailure({
                 platform: "qTest",
                 objectType: "Defect",
-                objectId: workItemId,
-                detail: "Unable to locate the matching qTest defect."
+                objectId: objectIdForErrors,
+                detail: `Unable to locate the matching qTest defect by ${description}.`
             });
             failed = true;
         }
@@ -748,10 +821,101 @@ ${clean}`;
         return { failed, defect };
     }
 
+    async function getDefectByWorkItemId(workItemId) {
+        const workItemTag = getWorkItemTag(workItemId);
+        const workItemTagField = await getDefectFieldDefinitionById(constants.DefectWorkItemTagFieldID);
+
+        if (!workItemTagField) {
+            emitFriendlyFailure({
+                platform: "Pulse",
+                objectType: "Configuration",
+                objectId: workItemId,
+                fieldName: "DefectWorkItemTagFieldID",
+                detail: "Configured qTest defect work item tag field was not found in the project field definitions.",
+            });
+            return { failed: true, defect: undefined };
+        }
+
+        if (workItemTagField.searchable === false) {
+            emitFriendlyFailure({
+                platform: "qTest",
+                objectType: "Configuration",
+                objectId: workItemId,
+                fieldName: workItemTagField.label,
+                detail: "The qTest defect work item tag field must be searchable for Azure DevOps defect lookup.",
+            });
+            return { failed: true, defect: undefined };
+        }
+
+        const customFieldQuery = `'${workItemTagField.label}' = '${workItemTag}'`;
+        const customFieldResult = await searchDefects(
+            customFieldQuery,
+            `work item tag '${workItemTag}'`,
+            workItemId
+        );
+        if (customFieldResult.failed || customFieldResult.defect) {
+            return customFieldResult;
+        }
+
+        const legacyPrefix = getLegacySummaryPrefix(workItemId);
+        console.log(
+            `[Info] No defect found by work item tag '${workItemTag}'. ` +
+            `Falling back to legacy summary prefix '${legacyPrefix}'.`
+        );
+        return searchDefects(
+            `Summary ~ '${legacyPrefix}'`,
+            `legacy summary prefix '${legacyPrefix}'`,
+            workItemId
+        );
+    }
+
+    async function getDefectDetails(defectId, defectPid = null) {
+        const url = `${normalizeBaseUrl(constants.ManagerURL)}/api/v3/projects/${constants.ProjectID}/defects/${defectId}`;
+
+        try {
+            return await doqTestRequest(url, "GET", null);
+        } catch (error) {
+            emitFriendlyFailure({
+                platform: "qTest",
+                objectType: "Defect",
+                objectId: defectId,
+                objectPid: defectPid,
+                detail: "Unable to retrieve the current qTest defect details.",
+                dedupKey: `defect-details:${defectId}`,
+            });
+            return null;
+        }
+    }
+
+    function evaluateDefectUpdate(defectDetails, requestBody) {
+        const changedFields = [];
+
+        for (const property of requestBody?.properties || []) {
+            const currentProperty = getPropertyById(defectDetails, property.field_id);
+            let currentValue = firstNonEmpty(currentProperty?.field_value, currentProperty?.field_value_name);
+
+            if (String(property.field_id) === String(constants.DefectSummaryFieldID)) {
+                currentValue = firstNonEmpty(currentProperty?.field_value, defectDetails?.name, defectDetails?.summary, currentProperty?.field_value_name);
+            } else if (String(property.field_id) === String(constants.DefectDescriptionFieldID)) {
+                currentValue = firstNonEmpty(currentProperty?.field_value, defectDetails?.description, currentProperty?.field_value_name);
+            }
+
+            if (!valuesEqual(currentValue, property.field_value)) {
+                changedFields.push(`field:${property.field_id}`);
+            }
+        }
+
+        return {
+            needsUpdate: changedFields.length > 0,
+            changedFields,
+        };
+    }
+
     async function updateDefect(
         defectToUpdate,
         summary,
         description,
+        workItemTag,
         linkFieldId,
         linkValue,
         applicationValue,
@@ -789,6 +953,15 @@ ${clean}`;
                 },
             ],
         };
+
+        const parsedWorkItemTagFieldId = parseInt(constants.DefectWorkItemTagFieldID, 10);
+        requestBody.properties.push({
+            field_id: Number.isNaN(parsedWorkItemTagFieldId)
+                ? constants.DefectWorkItemTagFieldID
+                : parsedWorkItemTagFieldId,
+            field_value: workItemTag,
+        });
+        console.log(`[Info] Added Work Item Tag '${workItemTag}' to qTest update payload.`);
 
         if (linkFieldId && linkValue) {
             const parsedLinkFieldId = parseInt(linkFieldId, 10);
@@ -965,6 +1138,17 @@ ${clean}`;
         console.log(`[Info] Updating defect '${defectId}' (${defectPid}).`);
         console.log('[Debug] Final qTest Update Payload:', JSON.stringify(requestBody, null, 2));
 
+        const defectDetails = await getDefectDetails(defectId, defectPid);
+        if (!defectDetails) {
+            return false;
+        }
+
+        const evaluation = evaluateDefectUpdate(defectDetails, requestBody);
+        if (!evaluation.needsUpdate) {
+            console.log(`[Info] Defect '${defectId}' is already in sync. Skipping update.`);
+            return true;
+        }
+
         try {
             await put(url, requestBody);
             console.log(`[Info] Defect '${defectId}' (${defectPid}) updated.`);
@@ -1064,9 +1248,9 @@ ${clean}`;
         return;
     }
 
-    const namePrefix = getNamePrefix(workItemId);
+    const workItemTag = getWorkItemTag(workItemId);
     const defectDescription = buildDefectDescription(event);
-    const defectSummary = buildDefectSummary(namePrefix, event);
+    const defectSummary = buildDefectSummary(event);
     const fields = getFields(event);
     const defectContext = defectToUpdate
         ? { id: defectToUpdate.id, pid: defectToUpdate.pid }
@@ -1121,6 +1305,14 @@ ${clean}`;
             }
         }
     } 
+
+    if (isAdoRevisionFromSyncUser(event)) {
+        console.log(
+            `[Info] ADO revision author '${getAdoRevisionActorLabel(event)}' matches SyncUserRegex. ` +
+            `Skipping qTest field sync for work item 'WI${workItemId}'.`
+        );
+        return;
+    }
 
     const adoState = getAdoFieldValue(fields, adoFieldRefs.state);
     console.log(`[Info] ADO State value: '${adoState}'`);
@@ -1474,6 +1666,7 @@ ${clean}`;
             defectToUpdate,
             defectSummary,
             defectDescription,
+            workItemTag,
             qtestLinkFieldId,
             adoLinkValue,
             qtestApplicationValue,

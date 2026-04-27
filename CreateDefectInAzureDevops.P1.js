@@ -96,6 +96,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             "DefectAssignedToFieldID",
             "DefectAssignedToTeamFieldID",
             "DefectTargetDateFieldID",
+            "DefectWorkItemTagFieldID",
         ].filter(name => !normalizeText(constants[name]));
 
         if (missingQtestConstants.length) {
@@ -207,8 +208,8 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         return true;
     }
 
-    function getNamePrefix(workItemId) {
-        return `WI${workItemId}: `;
+    function getWorkItemTag(workItemId) {
+        return `WI${workItemId}`;
     }
 
     function getFieldById(obj, fieldId) {
@@ -1491,15 +1492,10 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         }
     }
 
-    async function updateDefectSummary(defectId, fieldId, fieldValue) {
+    async function updateDefectFields(defectId, properties, failureDetails = {}) {
         const url = `https://${constants.ManagerURL}/api/v3/projects/${constants.ProjectID}/defects/${defectId}`;
         const requestBody = {
-            properties: [
-                {
-                    field_id: fieldId,
-                    field_value: fieldValue,
-                },
-            ],
+            properties,
         };
 
         console.log(`[Info] Updating defect '${defectId}'.`);
@@ -1520,9 +1516,9 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
                 platform: "qTest",
                 objectType: "Defect",
                 objectId: defectId,
-                fieldName: "Summary",
-                fieldValue: fieldValue,
-                detail: "Unable to update qTest defect after Azure DevOps creation."
+                fieldName: failureDetails.fieldName,
+                fieldValue: failureDetails.fieldValue,
+                detail: failureDetails.detail || "Unable to update qTest defect after Azure DevOps creation."
             });
 
             return false;
@@ -1615,11 +1611,27 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     if (!createResult || !createResult.bug) return;
 
     const workItemId = createResult.bug.id;
-    const newSummary = `${getNamePrefix(workItemId)}${defectDetails.summary}`;
-    console.log(`[Info] New defect name: ${newSummary}`);
+    const workItemTag = getWorkItemTag(workItemId);
+    const parsedWorkItemTagFieldId = parseInt(constants.DefectWorkItemTagFieldID, 10);
+    console.log(`[Info] Linking defect '${defectId}' with work item tag '${workItemTag}'.`);
 
-    const summaryUpdated = await updateDefectSummary(defectId, constants.DefectSummaryFieldID, newSummary);
-    if (!summaryUpdated) return;
+    const tagUpdated = await updateDefectFields(
+        defectId,
+        [
+            {
+                field_id: Number.isNaN(parsedWorkItemTagFieldId)
+                    ? constants.DefectWorkItemTagFieldID
+                    : parsedWorkItemTagFieldId,
+                field_value: workItemTag,
+            },
+        ],
+        {
+            fieldName: "Work Item Tag",
+            fieldValue: workItemTag,
+            detail: "Unable to update the qTest defect work item tag after Azure DevOps creation.",
+        }
+    );
+    if (!tagUpdated) return;
 
     if (defectDetails.assignedToWarning) {
         emitFriendlyWarning({

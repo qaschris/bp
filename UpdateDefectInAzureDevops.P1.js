@@ -446,6 +446,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
       "DefectAssignedToFieldID",
       "DefectAssignedToTeamFieldID",
       "DefectTargetDateFieldID",
+      "DefectWorkItemTagFieldID",
     ].filter(name => !normalizeText(constants[name]));
 
     if (missingQtestConstants.length) {
@@ -951,11 +952,15 @@ ${text}`;
 
     const summary = firstNonEmpty(getPropById(constants.DefectSummaryFieldID)?.field_value, defect.name);
     const description = firstNonEmpty(getPropById(constants.DefectDescriptionFieldID)?.field_value, defect.description);
+    const workItemTagValue = firstNonEmpty(
+      getPropById(constants.DefectWorkItemTagFieldID)?.field_value,
+      getPropById(constants.DefectWorkItemTagFieldID)?.field_value_name
+    );
     defectPid = defect?.pid || null;
     console.log("[Info] qTest Defect PID:", defectPid);
 
     const wiRegex = /WI[-\s:]?(\d+)/i;
-    let wiMatch = wiRegex.exec(summary) || wiRegex.exec(description || "");
+    let wiMatch = wiRegex.exec(workItemTagValue) || wiRegex.exec(summary) || wiRegex.exec(description || "");
 
     if (!wiMatch && props.length) {
       for (const p of props) {
