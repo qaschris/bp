@@ -460,20 +460,46 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         return `WI${workItemId}: `;
     }
 
-    function getAdoRevisionActorCandidates(eventData) {
-        const revisedBy = eventData?.resource?.revisedBy;
+    function appendAdoIdentityCandidates(target, value) {
+        if (!value) {
+            return;
+        }
+
+        if (typeof value === "string") {
+            const normalizedValue = normalizeText(value);
+            if (normalizedValue) {
+                target.push(normalizedValue);
+            }
+            return;
+        }
+
         const candidates = [
-            revisedBy?.displayName,
-            revisedBy?.uniqueName,
-            revisedBy?.mail,
-            revisedBy?.email,
-            revisedBy?.userPrincipalName,
-            revisedBy?.descriptor,
+            value.displayName,
+            value.uniqueName,
+            value.mail,
+            value.email,
+            value.userPrincipalName,
+            value.name,
+            value.descriptor,
         ];
 
-        return candidates
+        candidates
             .map(candidate => normalizeText(candidate))
-            .filter(Boolean);
+            .filter(Boolean)
+            .forEach(candidate => target.push(candidate));
+    }
+
+    function getAdoRevisionActorCandidates(eventData) {
+        const candidates = [];
+        appendAdoIdentityCandidates(candidates, eventData?.resource?.revisedBy);
+        appendAdoIdentityCandidates(candidates, eventData?.resource?.revision?.revisedBy);
+        appendAdoIdentityCandidates(candidates, eventData?.resource?.fields?.["System.ChangedBy"]?.newValue);
+        appendAdoIdentityCandidates(candidates, eventData?.resource?.revision?.fields?.["System.ChangedBy"]);
+        appendAdoIdentityCandidates(
+            candidates,
+            eventData?.resource?.revision?.fields?.["System.ChangedBy@OData.Community.Display.V1.FormattedValue"]
+        );
+        return [...new Set(candidates)];
     }
 
     function getAdoRevisionActorLabel(eventData) {
@@ -487,6 +513,53 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
         const regex = new RegExp(constants.SyncUserRegex, "i");
         return getAdoRevisionActorCandidates(eventData).some(candidate => regex.test(candidate));
+    }
+
+    function getChangedFieldNames(eventData) {
+        return Object.keys(eventData?.resource?.fields || {});
+    }
+
+    function isCommentAdded(eventData) {
+        const newCount = Number(eventData?.resource?.revision?.fields?.["System.CommentCount"] || 0);
+        const oldCount = Number(eventData?.resource?.fields?.["System.CommentCount"]?.oldValue || 0);
+        return newCount > oldCount;
+    }
+
+    function getInlineAdoComment(eventData) {
+        return normalizeText(
+            eventData?.resource?.revision?.fields?.["System.History"] ||
+            eventData?.resource?.fields?.["System.History"]?.newValue ||
+            eventData?.resource?.fields?.["System.History"]
+        );
+    }
+
+    function hasCommentActivity(eventData) {
+        const inlineComment = getInlineAdoComment(eventData);
+
+        return isCommentAdded(eventData)
+            || Boolean(eventData?.resource?.revision?.commentVersionRef?.commentId)
+            || Boolean(inlineComment);
+    }
+
+    function isCommentOnlyRevision(eventData) {
+        if (!hasCommentActivity(eventData)) {
+            return false;
+        }
+
+        const commentOnlyFields = new Set([
+            "System.CommentCount",
+            "System.History",
+            "System.ChangedBy",
+            "System.ChangedDate",
+            "System.AuthorizedDate",
+            "System.Rev",
+            "System.Watermark",
+        ]);
+
+        const businessFieldChanges = getChangedFieldNames(eventData)
+            .filter(fieldName => !commentOnlyFields.has(fieldName));
+
+        return businessFieldChanges.length === 0;
     }
 
     function getPropertyById(obj, fieldId) {
@@ -732,7 +805,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             return;
         }
 
-        const author = event.resource?.revisedBy?.displayName || "Unknown";
+        const author = getAdoRevisionActorLabel(event);
         const date = new Date(
             event.resource?.fields?.["System.ChangedDate"]?.newValue ||
             event.resource?.revision?.fields?.["System.ChangedDate"]
@@ -1104,10 +1177,10 @@ ${clean}`;
             });
         }
 
-        if (constants.DefectDiscussionFieldID) {
+        if (constants.DefectDiscussionFieldID && discussionValue) {
             requestBody.properties.push({
                 field_id: constants.DefectDiscussionFieldID,
-                field_value: discussionValue || ""
+                field_value: discussionValue
             });
             console.log(`[Info] Added Discussion to qTest update payload.`);
         }
@@ -1275,8 +1348,7 @@ ${clean}`;
 
     if (event.eventType === eventType.UPDATED) {
         const change = event.resource?.fields?.["System.CommentCount"];
-        const adoComment = event.resource?.revision?.fields?.["System.History"] 
-                        || event.resource?.fields?.["System.History"];
+        const adoComment = getInlineAdoComment(event);
         const commentMeta = event.resource?.revision?.commentVersionRef;
 
         // Case 1: Inline field comment
@@ -1305,6 +1377,15 @@ ${clean}`;
             }
         }
     } 
+
+    if (isCommentOnlyRevision(event)) {
+        const changedFields = getChangedFieldNames(event);
+        console.log(
+            `[Info] Comment-only ADO revision detected for 'WI${workItemId}'. ` +
+            `Changed fields: ${changedFields.join(", ") || "(none)"}. Skipping qTest field sync.`
+        );
+        return;
+    }
 
     if (isAdoRevisionFromSyncUser(event)) {
         console.log(

@@ -693,27 +693,6 @@ ${text}`;
         } catch (error) {
           console.error("[Error] Failed to post comment:", error.message);
         }
-
-        if (constants.DefectDiscussionFieldID) {
-          try {
-            await axios.put(
-              qTestDefectUrl,
-              {
-                properties: [
-                  {
-                    field_id: constants.DefectDiscussionFieldID,
-                    field_value: new Date().toISOString()
-                  }
-                ]
-              },
-              {
-                headers: { Authorization: `Bearer ${constants.QTEST_TOKEN}` }
-              }
-            );
-          } catch (error) {
-            console.error("[Error] Failed to force qTest defect change after comment sync:", error.message);
-          }
-        }
       }
 
       console.log(`[Info] Total comments synced: ${commentsSynced}`);
@@ -906,12 +885,28 @@ ${text}`;
     }
 
     let lastModifiedUser = "Unknown";
+    const syncUserCandidates = [];
+    const addSyncUserCandidates = (...values) => {
+      for (const value of values) {
+        const normalizedValue = normalizeText(value);
+        if (normalizedValue) {
+          syncUserCandidates.push(normalizedValue);
+        }
+      }
+    };
     if (defect.last_modified_user_id) {
       try {
         const userResponse = await axios.get(`https://${constants.ManagerURL}/api/v3/users/${defect.last_modified_user_id}`, {
           headers: { Authorization: `Bearer ${constants.QTEST_TOKEN}` }
         });
         lastModifiedUser = userResponse.data?.name || userResponse.data?.username || "Unknown";
+        addSyncUserCandidates(
+          userResponse.data?.name,
+          userResponse.data?.username,
+          userResponse.data?.email,
+          userResponse.data?.ldap_username,
+          userResponse.data?.external_user_name
+        );
       } catch (error) {
         console.warn("[Warn] Could not fetch last modified user:", error.message);
       }
@@ -938,8 +933,16 @@ ${text}`;
     console.log("[Info] Last Modified Date:", lastModifiedDate);
 
     if (constants.SyncUserRegex) {
-      const updaterName = defect?.updated_by?.name || defect?.last_modified_by?.name || "";
-      if (new RegExp(constants.SyncUserRegex, "i").test(updaterName)) {
+      addSyncUserCandidates(
+        lastModifiedUser,
+        defect?.updated_by?.name,
+        defect?.updated_by?.username,
+        defect?.last_modified_by?.name,
+        defect?.last_modified_by?.username
+      );
+
+      const syncUserRegex = new RegExp(constants.SyncUserRegex, "i");
+      if (syncUserCandidates.some(candidate => syncUserRegex.test(candidate))) {
         console.log("[Info] Update appears from ADO sync user; skipping to avoid loop.");
         return;
       }
