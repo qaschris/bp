@@ -633,6 +633,50 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
       }
     }
 
+    function getQtestCommentRawText(comment) {
+      return comment?.content || comment?.text || "";
+    }
+
+    function isSyncManagedComment(rawText) {
+      return !rawText || rawText.includes("[From ADO]") || rawText.includes("[From qTest]");
+    }
+
+    function isNewQtestCommentForAdo(comment, existingComments) {
+      const rawText = getQtestCommentRawText(comment);
+      if (isSyncManagedComment(rawText)) {
+        return false;
+      }
+
+      const commentId = comment.id || comment.comment_id || Date.now();
+      return !existingComments.some(existingComment =>
+        existingComment.includes(`[CID:${commentId}]`) || existingComment.includes(rawText.trim())
+      );
+    }
+
+    async function getQtestCommentsForAdoSync(defectId, projectId, existingComments) {
+      const maxAttempts = 3;
+      let latestComments = [];
+
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        latestComments = await getQtestComments(defectId, projectId);
+        const pendingComments = latestComments.filter(comment => isNewQtestCommentForAdo(comment, existingComments));
+
+        console.log(
+          `[Info] qTest comment sync check ${attempt + 1}/${maxAttempts}: ` +
+          `${latestComments.length} comments fetched, ${pendingComments.length} pending for ADO sync.`
+        );
+
+        if (pendingComments.length > 0 || attempt === maxAttempts - 1) {
+          return latestComments;
+        }
+
+        console.log("[Info] No new qTest comments visible yet. Retrying comment fetch...");
+        await new Promise(resolve => setTimeout(resolve, 1500));
+      }
+
+      return latestComments;
+    }
+
     function formatComment(content, author, commentId, createdDate, lastModifiedUser, lastModifiedDate) {
       const text = htmlToPlainText(content || "");
       const name = author || lastModifiedUser || "Unknown";
@@ -657,16 +701,13 @@ ${text}`;
       let commentsSynced = 0;
 
       for (const comment of qtestComments.sort((left, right) => new Date(left.created_date) - new Date(right.created_date))) {
-        const rawText = comment.content || comment.text || "";
-        if (!rawText || rawText.includes("[From ADO]") || rawText.includes("[From qTest]")) {
+        const rawText = getQtestCommentRawText(comment);
+        if (isSyncManagedComment(rawText)) {
           continue;
         }
 
         const commentId = comment.id || comment.comment_id || Date.now();
-        const alreadyExists = existingComments.some(existingComment =>
-          existingComment.includes(`[CID:${commentId}]`) || existingComment.includes(rawText.trim())
-        );
-        if (alreadyExists) {
+        if (!isNewQtestCommentForAdo(comment, existingComments)) {
           continue;
         }
 
@@ -1203,8 +1244,8 @@ ${text}`;
     const curAssignedTo = norm(extractAdoIdentityEmail(curAssignedToRaw));
     const curTargetDate = normalizeDateOnly(getAdoFieldValue(cur, adoFieldRefs.targetDate));
 
-    const qtestComments = await getQtestComments(defectId, projectId);
     const existingComments = await getExistingAdoComments(workItemId, encodedToken);
+    const qtestComments = await getQtestCommentsForAdoSync(defectId, projectId, existingComments);
 
     const desiredDescription = stripEmbeddedAdoLinkText(description || "");
     const desiredDescriptionPlain = htmlToPlainText(desiredDescription);
