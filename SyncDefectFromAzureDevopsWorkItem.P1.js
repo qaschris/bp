@@ -552,6 +552,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             "System.ChangedBy",
             "System.ChangedDate",
             "System.AuthorizedDate",
+            "System.RevisedDate",
             "System.Rev",
             "System.Watermark",
         ]);
