@@ -626,7 +626,12 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         const response = await axios.get(url, {
           headers: { Authorization: `Basic ${encodedToken}` }
         });
-        return response.data?.comments?.map(comment => (comment.text || "").trim()).filter(Boolean) || [];
+        return response.data?.comments
+          ?.map(comment => ({
+            id: comment.id,
+            text: (comment.text || "").trim(),
+          }))
+          .filter(comment => comment.text) || [];
       } catch (error) {
         console.warn("[Warn] Fetch ADO comments failed");
         return [];
@@ -641,25 +646,117 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
       return !rawText || rawText.includes("[From ADO]") || rawText.includes("[From qTest]");
     }
 
-    function isNewQtestCommentForAdo(comment, existingComments) {
+    function normalizeStoredCommentContent(value) {
+      return String(value || "")
+        .replace(/\r\n/g, "\n")
+        .trim();
+    }
+
+    function buildLegacyQtestFormattedComment(content, author, createdDate, lastModifiedUser, lastModifiedDate) {
+      const text = htmlToPlainText(content || "");
+      const name = author || lastModifiedUser || "Unknown";
+      const dateStr = createdDate || lastModifiedDate || "Unknown date";
+
+      return `[From qTest]<br>
+${name} - ${dateStr}<br>
+${text}`;
+    }
+
+    function findMatchingAdoCommentForQtest(comment, existingComments, formattedText, lastModifiedUser, lastModifiedDate) {
       const rawText = getQtestCommentRawText(comment);
       if (isSyncManagedComment(rawText)) {
-        return false;
+        return null;
       }
 
       const commentId = comment.id || comment.comment_id || Date.now();
-      return !existingComments.some(existingComment =>
-        existingComment.includes(`[CID:${commentId}]`) || existingComment.includes(rawText.trim())
+      const marker = `[CID:${commentId}]`;
+      const markerMatch = existingComments.find(existingComment => (existingComment.text || "").includes(marker));
+      if (markerMatch) {
+        return markerMatch;
+      }
+
+      const legacyFormattedText = buildLegacyQtestFormattedComment(
+        rawText,
+        comment.created_by?.name || comment.created_by?.username,
+        comment.created_date,
+        lastModifiedUser,
+        lastModifiedDate
       );
+      const normalizedLegacyText = normalizeStoredCommentContent(legacyFormattedText);
+      return existingComments.find(existingComment => {
+        const existingText = normalizeStoredCommentContent(existingComment.text);
+        return existingText === normalizedLegacyText || existingText === normalizeStoredCommentContent(formattedText);
+      }) || null;
     }
 
-    async function getQtestCommentsForAdoSync(defectId, projectId, existingComments) {
+    function evaluateQtestCommentSyncAction(comment, existingComments, lastModifiedUser, lastModifiedDate) {
+      const rawText = getQtestCommentRawText(comment);
+      if (isSyncManagedComment(rawText)) {
+        return { action: "skip" };
+      }
+
+      const commentId = comment.id || comment.comment_id || Date.now();
+      const formattedText = formatComment(
+        rawText,
+        comment.created_by?.name || comment.created_by?.username,
+        commentId,
+        comment.created_date,
+        lastModifiedUser,
+        lastModifiedDate
+      );
+
+      if (!formattedText.trim()) {
+        return { action: "skip" };
+      }
+
+      const matchingComment = findMatchingAdoCommentForQtest(
+        comment,
+        existingComments,
+        formattedText,
+        lastModifiedUser,
+        lastModifiedDate
+      );
+
+      if (!matchingComment) {
+        return {
+          action: "create",
+          commentId,
+          formattedText,
+        };
+      }
+
+      const currentContent = normalizeStoredCommentContent(matchingComment.text);
+      const desiredContent = normalizeStoredCommentContent(formattedText);
+      if (currentContent === desiredContent) {
+        return {
+          action: "noop",
+          commentId,
+        };
+      }
+
+      return {
+        action: "update",
+        commentId,
+        adoCommentId: matchingComment.id,
+        formattedText,
+      };
+    }
+
+    async function getQtestCommentsForAdoSync(defectId, projectId, existingComments, lastModifiedUser, lastModifiedDate) {
       const maxAttempts = 3;
       let latestComments = [];
 
       for (let attempt = 0; attempt < maxAttempts; attempt++) {
         latestComments = await getQtestComments(defectId, projectId);
-        const pendingComments = latestComments.filter(comment => isNewQtestCommentForAdo(comment, existingComments));
+        const pendingComments = latestComments.filter(comment => {
+          const evaluation = evaluateQtestCommentSyncAction(
+            comment,
+            existingComments,
+            lastModifiedUser,
+            lastModifiedDate
+          );
+          return evaluation.action === "create" || evaluation.action === "update";
+        });
 
         console.log(
           `[Info] qTest comment sync check ${attempt + 1}/${maxAttempts}: ` +
@@ -670,7 +767,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
           return latestComments;
         }
 
-        console.log("[Info] No new qTest comments visible yet. Retrying comment fetch...");
+        console.log("[Info] No new or updated qTest comments visible yet. Retrying comment fetch...");
         await new Promise(resolve => setTimeout(resolve, 1500));
       }
 
@@ -701,38 +798,43 @@ ${text}<br><br>[CID:${commentId}]`;
       let commentsSynced = 0;
 
       for (const comment of qtestComments.sort((left, right) => new Date(left.created_date) - new Date(right.created_date))) {
-        const rawText = getQtestCommentRawText(comment);
-        if (isSyncManagedComment(rawText)) {
-          continue;
-        }
-
-        const commentId = comment.id || comment.comment_id || Date.now();
-        if (!isNewQtestCommentForAdo(comment, existingComments)) {
-          continue;
-        }
-
-        const formattedText = formatComment(
-          rawText,
-          comment.created_by?.name || comment.created_by?.username,
-          commentId,
-          comment.created_date,
+        const evaluation = evaluateQtestCommentSyncAction(
+          comment,
+          existingComments,
           lastModifiedUser,
           lastModifiedDate
         );
-        if (!formattedText.trim()) {
+
+        if (evaluation.action === "skip" || evaluation.action === "noop") {
           continue;
         }
 
         try {
-          const commentUrl = `${constants.AzDoProjectURL}/_apis/wit/workItems/${workItemId}/comments?api-version=6.0-preview.3`;
-          await axios.post(commentUrl, { text: formattedText }, {
-            headers: { Authorization: `Basic ${encodedToken}` }
-          });
-          commentsSynced++;
-          existingComments.unshift(formattedText.trim());
-          console.log(`[SYNCED] Comment added (CID:${commentId})`);
+          if (evaluation.action === "create") {
+            const commentUrl = `${constants.AzDoProjectURL}/_apis/wit/workItems/${workItemId}/comments?api-version=6.0-preview.3`;
+            await axios.post(commentUrl, { text: evaluation.formattedText }, {
+              headers: { Authorization: `Basic ${encodedToken}` }
+            });
+            commentsSynced++;
+            existingComments.unshift({ id: null, text: evaluation.formattedText.trim() });
+            console.log(`[SYNCED] Comment added (CID:${evaluation.commentId})`);
+            continue;
+          }
+
+          if (evaluation.action === "update") {
+            const commentUrl = `${constants.AzDoProjectURL}/_apis/wit/workItems/${workItemId}/comments/${evaluation.adoCommentId}?api-version=7.0-preview.3`;
+            await axios.patch(commentUrl, { text: evaluation.formattedText }, {
+              headers: { Authorization: `Basic ${encodedToken}` }
+            });
+            commentsSynced++;
+            const existingComment = existingComments.find(candidate => String(candidate.id) === String(evaluation.adoCommentId));
+            if (existingComment) {
+              existingComment.text = evaluation.formattedText.trim();
+            }
+            console.log(`[SYNCED] Comment updated (CID:${evaluation.commentId})`);
+          }
         } catch (error) {
-          console.error("[Error] Failed to post comment:", error.message);
+          console.error("[Error] Failed to sync comment:", error.message);
         }
       }
 
@@ -1245,7 +1347,13 @@ ${text}<br><br>[CID:${commentId}]`;
     const curTargetDate = normalizeDateOnly(getAdoFieldValue(cur, adoFieldRefs.targetDate));
 
     const existingComments = await getExistingAdoComments(workItemId, encodedToken);
-    const qtestComments = await getQtestCommentsForAdoSync(defectId, projectId, existingComments);
+    const qtestComments = await getQtestCommentsForAdoSync(
+      defectId,
+      projectId,
+      existingComments,
+      lastModifiedUser,
+      lastModifiedDate
+    );
 
     const desiredDescription = stripEmbeddedAdoLinkText(description || "");
     const desiredDescriptionPlain = htmlToPlainText(desiredDescription);
