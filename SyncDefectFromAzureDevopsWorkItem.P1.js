@@ -767,24 +767,58 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         }
     }
 
-    function htmlToText(html = "") {
-        return String(html)
+    function normalizeCommentText(value) {
+        if (!value) return "";
+
+        return String(value)
             .replace(/<style[\s\S]*?<\/style>/gi, "")
             .replace(/<script[\s\S]*?<\/script>/gi, "")
-            .replace(/<\/div>|<\/li>|<\/p>/gi, "\n")
-            .replace(/<li>/gi, "  *  ")
-            .replace(/<br\s*\/?>/gi, "\n")
+            .replace(/<\/div>|<\/li>|<\/p>/gi, "\r\n")
+            .replace(/<li>/gi, "- ")
+            .replace(/<br\s*\/?>/gi, "\r\n")
             .replace(/<[^>]+>/gi, "")
-            .replace(/\n\s*\n/g, "\n")
+            .replace(/&nbsp;/gi, " ")
+            .replace(/\r?\n[ \t]*\r?\n[ \t]*/g, "\r\n")
             .trim();
     }
 
-    function generateCID(text) {
-        return Buffer.from(String(text || "")).toString("base64").slice(0, 20);
+    function formatCommentDate(value) {
+        if (!value) return "Unknown date";
+
+        const parsed = new Date(value);
+        return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toLocaleString();
+    }
+
+    function normalizeStoredCommentContent(value) {
+        return String(value || "")
+            .replace(/\r\n/g, "\n")
+            .trim();
+    }
+
+    function buildAdoCommentContent(comment) {
+        const marker = `[CID:${comment.commentId}]`;
+        const author = normalizeText(comment.author) || "Unknown";
+        const date = formatCommentDate(comment.createdDate);
+
+        return `[From ADO]
+${author} - ${date}
+${comment.commentText}
+
+${marker}`;
+    }
+
+    function buildLegacyAdoCommentContent(comment) {
+        const author = normalizeText(comment.author) || "Unknown";
+        const date = formatCommentDate(comment.createdDate);
+
+        return `[From ADO]
+${author} - ${date}
+
+${comment.commentText}`;
     }
 
     async function getQtestComments(defectId) {
-        const url = `${normalizeBaseUrl(constants.ManagerURL)}/api/v3/projects/${constants.ProjectID}/defects/${defectId}/comments`;
+        const url = `${normalizeBaseUrl(constants.ManagerURL)}/api/v3/projects/${constants.ProjectID}/defects/${defectId}/comments?size=1000&page=1`;
         const response = await doqTestRequest(url, "GET", null);
         return response?.items || [];
     }
@@ -794,30 +828,140 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         await doqTestRequest(url, "POST", { content });
     }
 
-    async function syncComment(defectId, text) {
-        const clean = htmlToText(text);
-        if (!clean) return;
+    async function updateQtestComment(defectId, commentId, content) {
+        const url = `${normalizeBaseUrl(constants.ManagerURL)}/api/v3/projects/${constants.ProjectID}/defects/${defectId}/comments/${commentId}`;
+        await doqTestRequest(url, "PUT", { content });
+    }
 
-        const cid = generateCID(clean);
-        const existing = await getQtestComments(defectId);
+    function shouldSkipAdoCommentForQtestSync(comment) {
+        const commentText = normalizeCommentText(comment?.text || comment?.markdown);
+        if (!commentText || commentText.includes("[From qTest]")) {
+            return true;
+        }
 
-        if (existing.some(comment => comment.content?.includes(`[CID:${cid}]`))) {
-            console.log("[Info] Duplicate comment skipped");
+        if (!constants.SyncUserRegex) {
+            return false;
+        }
+
+        const regex = new RegExp(constants.SyncUserRegex, "i");
+        return [
+            comment?.createdBy?.displayName,
+            comment?.createdBy?.uniqueName,
+            comment?.createdOnBehalfOf?.displayName,
+            comment?.createdOnBehalfOf?.uniqueName,
+            comment?.revisedBy?.displayName,
+            comment?.revisedBy?.uniqueName,
+            comment?.modifiedBy?.displayName,
+            comment?.modifiedBy?.uniqueName,
+        ].some(value => value && regex.test(String(value)));
+    }
+
+    async function extractAllAdoComments(workItemId, defectContext = null) {
+        const maxAttempts = 3;
+
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+            const comments = await getAdoComments(workItemId, defectContext);
+
+            if (comments.length > 0) {
+                console.log(`[Info] Fetched ${comments.length} ADO comments for defect sync.`);
+                return comments
+                    .filter(comment => !shouldSkipAdoCommentForQtestSync(comment))
+                    .map(comment => ({
+                        commentText: normalizeCommentText(comment?.text || comment?.markdown),
+                        commentId: comment?.id,
+                        author:
+                            comment?.createdBy?.displayName ||
+                            comment?.createdOnBehalfOf?.displayName ||
+                            comment?.revisedBy?.displayName ||
+                            comment?.modifiedBy?.displayName ||
+                            "",
+                        createdDate:
+                            comment?.createdOnBehalfDate ||
+                            comment?.createdDate ||
+                            comment?.revisedDate ||
+                            comment?.modifiedDate ||
+                            null,
+                    }))
+                    .filter(comment => comment.commentText && comment.commentId);
+            }
+
+            if (attempt < maxAttempts - 1) {
+                console.log("[Info] No ADO comments available yet for defect sync. Retrying...");
+                await new Promise(resolve => setTimeout(resolve, 1500));
+            }
+        }
+
+        console.log("[Info] No ADO comments found after retries for defect sync.");
+        return [];
+    }
+
+    function findLegacyMatchingQtestComment(existingComments, comment) {
+        const desiredLegacyContent = normalizeStoredCommentContent(buildLegacyAdoCommentContent(comment));
+        return existingComments.find(existingComment => {
+            const existingContent = normalizeStoredCommentContent(existingComment?.content);
+            if (!existingContent || existingContent.includes("[CID:")) {
+                return false;
+            }
+
+            return existingContent === desiredLegacyContent;
+        }) || null;
+    }
+
+    async function syncDefectCommentsIfNeeded(eventData, workItemId, defectId, defectContext = null) {
+        if (!defectId) return;
+
+        if (!hasCommentActivity(eventData)) {
+            console.log("[Info] No defect comment change detected.");
             return;
         }
 
-        const author = getAdoRevisionActorLabel(event);
-        const date = new Date(
-            event.resource?.fields?.["System.ChangedDate"]?.newValue ||
-            event.resource?.revision?.fields?.["System.ChangedDate"]
-        ).toLocaleString();
+        console.log(`[Info] Defect comment activity detected for 'WI${workItemId}'. Fetching all from API...`);
+        const comments = await extractAllAdoComments(workItemId, defectContext);
+        if (comments.length === 0) {
+            console.log("[Info] No ADO defect comment text found after filtering.");
+            return;
+        }
 
-        const content = `[From ADO]
-${author} - ${date}
+        let existing = [];
+        try {
+            existing = await getQtestComments(defectId);
+        } catch (error) {
+            console.error("[Error] Failed to fetch qTest defect comments.", error);
+            return;
+        }
 
-${clean}`;
+        for (const comment of comments) {
+            const marker = `[CID:${comment.commentId}]`;
+            const desiredContent = buildAdoCommentContent(comment);
+            let matchingComment = existing.find(existingComment => (existingComment.content || "").includes(marker));
 
-        await createQtestComment(defectId, content);
+            if (!matchingComment) {
+                matchingComment = findLegacyMatchingQtestComment(existing, comment);
+            }
+
+            try {
+                if (!matchingComment) {
+                    await createQtestComment(defectId, desiredContent);
+                    existing.unshift({ content: desiredContent });
+                    console.log(`[Info] Defect comment ${comment.commentId} synced successfully.`);
+                    continue;
+                }
+
+                const currentContent = normalizeStoredCommentContent(matchingComment.content);
+                const normalizedDesiredContent = normalizeStoredCommentContent(desiredContent);
+
+                if (currentContent === normalizedDesiredContent) {
+                    console.log(`[Info] Defect comment ${comment.commentId} already synced. Skipping...`);
+                    continue;
+                }
+
+                await updateQtestComment(defectId, matchingComment.id, desiredContent);
+                matchingComment.content = desiredContent;
+                console.log(`[Info] Defect comment ${comment.commentId} updated successfully.`);
+            } catch (error) {
+                console.error(`[Error] Failed to sync qTest defect comment for ${comment.commentId}.`, error);
+            }
+        }
     }
 
 /*     function formatDiscussion(comments) {
@@ -1342,54 +1486,9 @@ ${clean}`;
         ? { id: defectToUpdate.id, pid: defectToUpdate.pid }
         : null;
 
-/*     if (event.eventType === eventType.UPDATED) {
-        const change = event.resource?.fields?.["System.CommentCount"];
-        if (change?.newValue > change?.oldValue) {
-            const adoComment =
-                event.resource?.revision?.fields?.["System.History"] ||
-                event.resource?.fields?.["System.History"];
-
-            if (adoComment && !adoComment.includes("[From qTest]")) {
-                try {
-                    await syncComment(defectToUpdate.id, adoComment);
-                } catch (error) {
-                    console.error("[Error] Failed to sync defect comment from Azure DevOps to qTest.", error);
-                }
-            }
-        }
-    } */
-
     if (event.eventType === eventType.UPDATED) {
-        const change = event.resource?.fields?.["System.CommentCount"];
-        const adoComment = getInlineAdoComment(event);
-        const commentMeta = event.resource?.revision?.commentVersionRef;
-
-        // Case 1: Inline field comment
-        if (adoComment && !adoComment.includes("[From qTest]")) {
-            try {
-                await syncComment(defectToUpdate.id, adoComment);
-            } catch (error) {
-                console.error("[Error] Failed to sync defect comment from Azure DevOps to qTest.", error);
-            }
-        }
-
-        // Case 2: Discussion comment
-        else if (change?.newValue > change?.oldValue && commentMeta) {
-            try {
-                const response = await fetch(commentMeta.url, {
-                    headers: { "Authorization": `Bearer ${process.env.ADO_PAT}` }
-                });
-                const commentData = await response.json();
-
-                const discussionText = commentData.text || commentData.markdown;
-                if (discussionText && !discussionText.includes("[From qTest]")) {
-                    await syncComment(defectToUpdate.id, discussionText);
-                }
-            } catch (error) {
-                console.error("[Error] Failed to fetch discussion comment from Azure DevOps.", error);
-            }
-        }
-    } 
+        await syncDefectCommentsIfNeeded(event, workItemId, defectToUpdate.id, defectContext);
+    }
 
     if (isCommentOnlyRevision(event)) {
         const changedFields = getChangedFieldNames(event);
@@ -1452,14 +1551,6 @@ ${clean}`;
         };
     }
 
-    let adoComments = await getAdoComments(workItemId, defectContext);
-
-    if (constants.SyncUserRegex) {
-        const regex = new RegExp(constants.SyncUserRegex, "i");
-        adoComments = adoComments.filter(c => !regex.test(c.createdBy?.displayName || ""));
-    }
-
-//    const discussionHtml = formatDiscussion(adoComments);
     let qtestDiscussionValue = "";
 
 /*     if (discussionHtml) {

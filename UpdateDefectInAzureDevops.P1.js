@@ -684,7 +684,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
       return `[From qTest]<br>
 ${name} - ${dateStr}<br>
-${text}`;
+${text}<br><br>[CID:${commentId}]`;
     }
 
     async function syncQtestCommentsToAdo({
