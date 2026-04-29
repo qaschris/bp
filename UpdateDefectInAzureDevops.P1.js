@@ -11,6 +11,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
   const DEFECT_SOURCE_TEAM_FIELD_ID = normalizeText(constants.DefectSourceTeamFieldID);
   const DEFECT_SITE_NAME_FIELD_ID = normalizeText(constants.DefectSiteNameFieldID) || "1569";
   const DEFECT_ITERATION_PATH_FIELD_ID = normalizeText(constants.DefectIterationPathFieldID) || "1603";
+  const OPTIONAL_NONE_LABEL = "None";
 
   function emitEvent(name, payload) {
     return (t = triggers.find(t => t.name === name))
@@ -85,6 +86,20 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
   function normalizeAdoPicklistValue(value) {
     return normalizeText(value).replace(/\s+/g, " ").trim();
+  }
+
+  function normalizeOptionalNoneToBlank(value) {
+    const normalizedValue = normalizeText(value);
+    return normalizeLookupLabel(normalizedValue) === normalizeLookupLabel(OPTIONAL_NONE_LABEL)
+      ? ""
+      : normalizedValue;
+  }
+
+  function normalizeOptionalNonePicklistToBlank(value) {
+    const normalizedValue = normalizeAdoPicklistValue(value);
+    return normalizeLookupLabel(normalizedValue) === normalizeLookupLabel(OPTIONAL_NONE_LABEL)
+      ? ""
+      : normalizedValue;
   }
 
   function describeCodePoints(value) {
@@ -1192,10 +1207,12 @@ ${text}<br><br>[CID:${commentId}]`;
       rawValue: rootCauseProp?.field_value ?? null,
       rawLabel: rootCauseProp?.field_value_name ?? null,
     });
-    const rootCauseLabel = normalizeAdoPicklistValue(
+    const rootCauseLabel = normalizeOptionalNonePicklistToBlank(
       await getDefectFieldLabel(constants.DefectRootCauseFieldID, rootCauseProp)
     );
-    const resolvedReasonLabel = await getDefectFieldLabel(constants.DefectResolvedReasonFieldID, resolvedReasonProp);
+    const resolvedReasonLabel = normalizeOptionalNoneToBlank(
+      await getDefectFieldLabel(constants.DefectResolvedReasonFieldID, resolvedReasonProp)
+    );
 
     let userName = "";
     let assignedToWarningDetails = null;

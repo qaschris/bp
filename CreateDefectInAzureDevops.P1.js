@@ -20,6 +20,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const DEFECT_SITE_NAME_FIELD_ID = normalizeText(constants.DefectSiteNameFieldID) || "1569";
     const DEFECT_ITERATION_PATH_FIELD_ID = normalizeText(constants.DefectIterationPathFieldID) || "1603";
     const DEFECT_LINK_TO_AZURE_DEVOPS_LABEL = "Link to Azure DevOps";
+    const OPTIONAL_NONE_LABEL = "None";
 
     console.log(`[Info] Create defect event received for defect '${defectId}' in project '${projectId}'`);
 
@@ -50,6 +51,13 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
     function normalizeAdoPicklistValue(value) {
         return normalizeText(value).replace(/\s+/g, " ").trim();
+    }
+
+    function normalizeOptionalNonePicklistToBlank(value) {
+        const normalizedValue = normalizeAdoPicklistValue(value);
+        return normalizeLookupLabel(normalizedValue) === normalizeLookupLabel(OPTIONAL_NONE_LABEL)
+            ? ""
+            : normalizedValue;
     }
 
     function describeCodePoints(value) {
@@ -1107,7 +1115,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             console.log(`[Info] Skipping External Reference — no value in qTest`);
         }
 
-        const normalizedRootCause = normalizeAdoPicklistValue(qtestRootCause);
+        const normalizedRootCause = normalizeOptionalNonePicklistToBlank(qtestRootCause);
         if (normalizedRootCause) {
             requestBody.push({
                 op: "add",
@@ -1370,7 +1378,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             requestBody.push(buildFieldPatchOperation(adoFieldRefs.iterationPath, finalIterationPath));
         }
 
-        const normalizedRootCause = normalizeAdoPicklistValue(qtestRootCause);
+        const normalizedRootCause = normalizeOptionalNonePicklistToBlank(qtestRootCause);
         if (normalizedRootCause) {
             requestBody.push(buildFieldPatchOperation(adoFieldRefs.rootCause, normalizedRootCause));
             console.log(`[Info] Added Root Cause to ADO: ${normalizedRootCause}`);

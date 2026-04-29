@@ -11,6 +11,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const DEFECT_SITE_NAME_FIELD_ID = normalizeText(constants.DefectSiteNameFieldID) || "1569";
     const DEFECT_ITERATION_PATH_FIELD_ID = normalizeText(constants.DefectIterationPathFieldID) || "1603";
     const DEFECT_LINK_TO_AZURE_DEVOPS_LABEL = "Link to Azure DevOps";
+    const OPTIONAL_NONE_LABEL = "None";
 
     const DEFAULT_AREA_PATH = constants.AreaPath;
     const DEFAULT_QTEST_ASSIGNED_TO_IDENTITY = "ado-qtest-svc@bp.com";
@@ -1144,6 +1145,62 @@ ${comment.commentText}`;
         };
     }
 
+    async function resolveBlankAdoOptionalFieldToQtestValue({
+        fieldId,
+        fieldLabel,
+        desiredValue,
+        defectDetails,
+        defectContext,
+    }) {
+        if (desiredValue !== "") {
+            return desiredValue;
+        }
+
+        const currentProperty = getPropertyById(defectDetails, fieldId);
+        const currentLabel = normalizeText(firstNonEmpty(currentProperty?.field_value_name, currentProperty?.field_value));
+        const currentStoredValue = firstNonEmpty(currentProperty?.field_value, currentProperty?.field_value_name);
+        if (!currentLabel) {
+            return "";
+        }
+
+        if (normalizeLabel(currentLabel) === normalizeLabel(OPTIONAL_NONE_LABEL)) {
+            console.log(`[Info] qTest ${fieldLabel} is already '${OPTIONAL_NONE_LABEL}'. Leaving it unchanged for blank ADO value.`);
+            return currentStoredValue;
+        }
+
+        try {
+            const noneValue = await resolveDefectFieldValue(
+                fieldId,
+                OPTIONAL_NONE_LABEL,
+                fieldLabel,
+                defectContext,
+                { emitFailure: false, includeInactive: true }
+            );
+
+            console.log(
+                `[Info] ADO ${fieldLabel} is blank while qTest currently has '${currentLabel}'. ` +
+                `Defaulting qTest ${fieldLabel} to '${OPTIONAL_NONE_LABEL}'.`
+            );
+            return noneValue;
+        } catch (error) {
+            const detail =
+                `ADO ${fieldLabel} is blank while qTest currently has '${currentLabel}', ` +
+                `but qTest option '${OPTIONAL_NONE_LABEL}' could not be resolved. ${fieldLabel} was left unchanged.`;
+            console.log(`[Warn] ${detail}`);
+            emitFriendlyWarning({
+                platform: "qTest",
+                objectType: "Defect",
+                objectId: defectContext?.id ?? "Unknown",
+                objectPid: defectContext?.pid,
+                fieldName: fieldLabel,
+                fieldValue: currentLabel,
+                detail,
+                dedupKey: `warning:${fieldLabel}:none-option:${defectContext?.id ?? "unknown"}`,
+            });
+            return currentStoredValue;
+        }
+    }
+
     async function updateDefect(
         defectToUpdate,
         summary,
@@ -1172,8 +1229,29 @@ ${comment.commentText}`;
     ) {
         const defectId = defectToUpdate.id;
         const defectPid = defectToUpdate.pid;
+        const defectContext = { id: defectId, pid: defectPid };
 
         const url = `https://${constants.ManagerURL}/api/v3/projects/${constants.ProjectID}/defects/${defectId}`;
+        const defectDetails = await getDefectDetails(defectId, defectPid);
+        if (!defectDetails) {
+            return false;
+        }
+
+        const effectiveRootCauseValue = await resolveBlankAdoOptionalFieldToQtestValue({
+            fieldId: constants.DefectRootCauseFieldID,
+            fieldLabel: "Root Cause",
+            desiredValue: rootCauseValue,
+            defectDetails,
+            defectContext,
+        });
+        const effectiveResolvedReasonValue = await resolveBlankAdoOptionalFieldToQtestValue({
+            fieldId: constants.DefectResolvedReasonFieldID,
+            fieldLabel: "Resolved Reason",
+            desiredValue: resolvedReasonValue,
+            defectDetails,
+            defectContext,
+        });
+
         const requestBody = {
             properties: [
                 {
@@ -1264,14 +1342,14 @@ ${comment.commentText}`;
             });
         }
 
-        if (constants.DefectRootCauseFieldID && rootCauseValue !== null && rootCauseValue !== undefined) {
+        if (constants.DefectRootCauseFieldID && effectiveRootCauseValue !== null && effectiveRootCauseValue !== undefined) {
             requestBody.properties.push(
-                buildQtestOptionalConstrainedProperty(constants.DefectRootCauseFieldID, rootCauseValue)
+                buildQtestOptionalConstrainedProperty(constants.DefectRootCauseFieldID, effectiveRootCauseValue)
             );
             console.log(
-                rootCauseValue === ""
+                effectiveRootCauseValue === ""
                     ? `[Info] Clearing Root Cause in qTest update payload.`
-                    : `[Info] Added Root Cause '${rootCauseValue}' to qTest update payload.`
+                    : `[Info] Added Root Cause '${effectiveRootCauseValue}' to qTest update payload.`
             );
         } else {
             console.log(`[Warn] No Root Cause provided or mapping not found`);
@@ -1314,14 +1392,14 @@ ${comment.commentText}`;
             console.log(`[Info] Added External Reference to qTest update payload.`);
         }
 
-        if (constants.DefectResolvedReasonFieldID && resolvedReasonValue !== null && resolvedReasonValue !== undefined) {
+        if (constants.DefectResolvedReasonFieldID && effectiveResolvedReasonValue !== null && effectiveResolvedReasonValue !== undefined) {
             requestBody.properties.push(
-                buildQtestOptionalConstrainedProperty(constants.DefectResolvedReasonFieldID, resolvedReasonValue)
+                buildQtestOptionalConstrainedProperty(constants.DefectResolvedReasonFieldID, effectiveResolvedReasonValue)
             );
             console.log(
-                resolvedReasonValue === ""
+                effectiveResolvedReasonValue === ""
                     ? `[Info] Clearing Resolved Reason in qTest update payload.`
-                    : `[Info] Added Resolved Reason '${resolvedReasonValue}' to qTest update payload.`
+                    : `[Info] Added Resolved Reason '${effectiveResolvedReasonValue}' to qTest update payload.`
             );
         } else {
             console.log(`[Warn] No Resolved Reason provided or mapping not found`);
@@ -1367,11 +1445,6 @@ ${comment.commentText}`;
 
         console.log(`[Info] Updating defect '${defectId}' (${defectPid}).`);
         console.log('[Debug] Final qTest Update Payload:', JSON.stringify(requestBody, null, 2));
-
-        const defectDetails = await getDefectDetails(defectId, defectPid);
-        if (!defectDetails) {
-            return false;
-        }
 
         const evaluation = evaluateDefectUpdate(defectDetails, requestBody);
         if (!evaluation.needsUpdate) {
