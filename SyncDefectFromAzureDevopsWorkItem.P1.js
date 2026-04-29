@@ -985,6 +985,21 @@ ${clean}`;
         };
     }
 
+    function buildQtestOptionalConstrainedProperty(fieldId, rawValue) {
+        const parsedFieldId = parseInt(fieldId, 10);
+        const normalizedFieldId = Number.isNaN(parsedFieldId) ? fieldId : parsedFieldId;
+
+        if (rawValue === "") {
+            return { field_id: normalizedFieldId };
+        }
+
+        const parsedValue = parseInt(rawValue, 10);
+        return {
+            field_id: normalizedFieldId,
+            field_value: Number.isNaN(parsedValue) ? rawValue : parsedValue,
+        };
+    }
+
     async function updateDefect(
         defectToUpdate,
         summary,
@@ -1106,16 +1121,9 @@ ${clean}`;
         }
 
         if (constants.DefectRootCauseFieldID && rootCauseValue !== null && rootCauseValue !== undefined) {
-            const parsedRootCauseFieldId = parseInt(constants.DefectRootCauseFieldID, 10);
-            const parsedRootCauseValue = parseInt(rootCauseValue, 10);
-            requestBody.properties.push({
-                field_id: Number.isNaN(parsedRootCauseFieldId)
-                    ? constants.DefectRootCauseFieldID
-                    : parsedRootCauseFieldId,
-                field_value: Number.isNaN(parsedRootCauseValue)
-                    ? rootCauseValue
-                    : parsedRootCauseValue,
-            });
+            requestBody.properties.push(
+                buildQtestOptionalConstrainedProperty(constants.DefectRootCauseFieldID, rootCauseValue)
+            );
             console.log(
                 rootCauseValue === ""
                     ? `[Info] Clearing Root Cause in qTest update payload.`
@@ -1163,16 +1171,9 @@ ${clean}`;
         }
 
         if (constants.DefectResolvedReasonFieldID && resolvedReasonValue !== null && resolvedReasonValue !== undefined) {
-            const parsedResolvedReasonFieldId = parseInt(constants.DefectResolvedReasonFieldID, 10);
-            const parsedResolvedReasonValue = parseInt(resolvedReasonValue, 10);
-            requestBody.properties.push({
-                field_id: Number.isNaN(parsedResolvedReasonFieldId)
-                    ? constants.DefectResolvedReasonFieldID
-                    : parsedResolvedReasonFieldId,
-                field_value: Number.isNaN(parsedResolvedReasonValue)
-                    ? resolvedReasonValue
-                    : parsedResolvedReasonValue,
-            });
+            requestBody.properties.push(
+                buildQtestOptionalConstrainedProperty(constants.DefectResolvedReasonFieldID, resolvedReasonValue)
+            );
             console.log(
                 resolvedReasonValue === ""
                     ? `[Info] Clearing Resolved Reason in qTest update payload.`
