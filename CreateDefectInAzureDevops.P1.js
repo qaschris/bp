@@ -19,6 +19,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const DEFECT_APPLICATION_FIELD_ID = normalizeText(constants.DefectApplicationFieldID) || "1566";
     const DEFECT_SITE_NAME_FIELD_ID = normalizeText(constants.DefectSiteNameFieldID) || "1569";
     const DEFECT_ITERATION_PATH_FIELD_ID = normalizeText(constants.DefectIterationPathFieldID) || "1603";
+    const DEFECT_LINK_TO_AZURE_DEVOPS_LABEL = "Link to Azure DevOps";
 
     console.log(`[Info] Create defect event received for defect '${defectId}' in project '${projectId}'`);
 
@@ -276,6 +277,17 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         const fields = normalizeFieldResponse(response.data);
         qtestMetadataCache[cacheKey] = fields;
         return fields;
+    }
+
+    async function getDefectFieldIdByLabel(fieldLabel) {
+        const normalizedFieldLabel = normalizeLookupLabel(fieldLabel);
+        if (!normalizedFieldLabel) {
+            return null;
+        }
+
+        const fields = await getDefectFieldDefinitions();
+        const fieldDefinition = fields.find(field => normalizeLookupLabel(field?.label) === normalizedFieldLabel);
+        return fieldDefinition?.id ?? null;
     }
 
     async function getDefectFieldOptionLabelByValue(fieldId, rawValue) {
@@ -1613,25 +1625,58 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const workItemId = createResult.bug.id;
     const workItemTag = getWorkItemTag(workItemId);
     const parsedWorkItemTagFieldId = parseInt(constants.DefectWorkItemTagFieldID, 10);
+    const adoLinkValue = normalizeText(
+        createResult?.bug?._links?.html?.href ||
+        createResult?.bug?.url
+    );
+    const qtestLinkFieldId = normalizeText(constants.DefectLinkToAzureDevOpsFieldID)
+        || String(await getDefectFieldIdByLabel(DEFECT_LINK_TO_AZURE_DEVOPS_LABEL) || "");
+    let linkFieldWarningDetails = null;
+    if (adoLinkValue && !qtestLinkFieldId) {
+        linkFieldWarningDetails = {
+            platform: "qTest",
+            objectType: "Defect",
+            objectId: defectId,
+            objectPid: defectDetails.pid,
+            fieldName: DEFECT_LINK_TO_AZURE_DEVOPS_LABEL,
+            fieldValue: adoLinkValue,
+            detail: `qTest field '${DEFECT_LINK_TO_AZURE_DEVOPS_LABEL}' was not found. Azure DevOps link sync was skipped.`,
+        };
+    }
     console.log(`[Info] Linking defect '${defectId}' with work item tag '${workItemTag}'.`);
+
+    const defectUpdateProperties = [
+        {
+            field_id: Number.isNaN(parsedWorkItemTagFieldId)
+                ? constants.DefectWorkItemTagFieldID
+                : parsedWorkItemTagFieldId,
+            field_value: workItemTag,
+        },
+    ];
+
+    if (qtestLinkFieldId && adoLinkValue) {
+        const parsedLinkFieldId = parseInt(qtestLinkFieldId, 10);
+        defectUpdateProperties.push({
+            field_id: Number.isNaN(parsedLinkFieldId) ? qtestLinkFieldId : parsedLinkFieldId,
+            field_value: adoLinkValue,
+        });
+        console.log(`[Info] Linking defect '${defectId}' with Azure DevOps URL '${adoLinkValue}'.`);
+    }
 
     const tagUpdated = await updateDefectFields(
         defectId,
-        [
-            {
-                field_id: Number.isNaN(parsedWorkItemTagFieldId)
-                    ? constants.DefectWorkItemTagFieldID
-                    : parsedWorkItemTagFieldId,
-                field_value: workItemTag,
-            },
-        ],
+        defectUpdateProperties,
         {
             fieldName: "Work Item Tag",
             fieldValue: workItemTag,
-            detail: "Unable to update the qTest defect work item tag after Azure DevOps creation.",
+            detail: "Unable to update the qTest defect link metadata after Azure DevOps creation.",
         }
     );
     if (!tagUpdated) return;
+
+    if (linkFieldWarningDetails) {
+        emitFriendlyWarning(linkFieldWarningDetails);
+    }
 
     if (defectDetails.assignedToWarning) {
         emitFriendlyWarning({
