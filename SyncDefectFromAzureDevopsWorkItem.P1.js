@@ -1105,13 +1105,24 @@ ${clean}`;
             });
         }
 
-        if (constants.DefectRootCauseFieldID && rootCauseValue !== null && rootCauseValue !== undefined && rootCauseValue !== "") {
+        if (constants.DefectRootCauseFieldID && rootCauseValue !== null && rootCauseValue !== undefined) {
+            const parsedRootCauseFieldId = parseInt(constants.DefectRootCauseFieldID, 10);
             const parsedRootCauseValue = parseInt(rootCauseValue, 10);
             requestBody.properties.push({
-                field_id: constants.DefectRootCauseFieldID,
-                field_value: Number.isNaN(parsedRootCauseValue) ? rootCauseValue : parsedRootCauseValue,
+                field_id: Number.isNaN(parsedRootCauseFieldId)
+                    ? constants.DefectRootCauseFieldID
+                    : parsedRootCauseFieldId,
+                field_value: Number.isNaN(parsedRootCauseValue)
+                    ? rootCauseValue
+                    : parsedRootCauseValue,
             });
-            console.log(`[Info] Added Root Cause '${rootCauseValue}' to qTest update payload.`);
+            console.log(
+                rootCauseValue === ""
+                    ? `[Info] Clearing Root Cause in qTest update payload.`
+                    : `[Info] Added Root Cause '${rootCauseValue}' to qTest update payload.`
+            );
+        } else {
+            console.log(`[Warn] No Root Cause provided or mapping not found`);
         }
 
         if (defectTypeValue) {
