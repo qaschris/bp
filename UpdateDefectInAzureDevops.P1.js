@@ -1315,6 +1315,11 @@ ${text}`;
       console.log("[Info] Updating Root Cause:", { from: curRootCause || "(empty)", to: rootCauseLabel });
       console.log(`[Debug] Root Cause code points: ${describeCodePoints(rootCauseLabel)}`);
       patchData.push(buildFieldPatchOperation(adoFieldRefs.rootCause, rootCauseLabel));
+    } else if (!rootCauseLabel && curRootCause) {
+      console.log("[Info] Clearing Root Cause in ADO:", { from: curRootCause });
+      patchData.push(buildFieldPatchOperation(adoFieldRefs.rootCause, ""));
+    } else if (!rootCauseLabel) {
+      console.log("[Info] Root Cause is blank in qTest and already blank in ADO. No Root Cause patch needed.");
     }
 
     if (curProposedFix !== desiredProposedFixPlain) {

@@ -1370,8 +1370,13 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             requestBody.push(buildFieldPatchOperation(adoFieldRefs.iterationPath, finalIterationPath));
         }
 
-        if (qtestRootCause) {
-            requestBody.push(buildFieldPatchOperation(adoFieldRefs.rootCause, qtestRootCause));
+        const normalizedRootCause = normalizeAdoPicklistValue(qtestRootCause);
+        if (normalizedRootCause) {
+            requestBody.push(buildFieldPatchOperation(adoFieldRefs.rootCause, normalizedRootCause));
+            console.log(`[Info] Added Root Cause to ADO: ${normalizedRootCause}`);
+            console.log(`[Debug] Root Cause code points: ${describeCodePoints(normalizedRootCause)}`);
+        } else {
+            console.log("[Info] Skipping Root Cause - no value in qTest.");
         }
 
         if (qtestProposedFix) {
