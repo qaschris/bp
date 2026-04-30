@@ -191,6 +191,8 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             applicationName: normalizeText(constants.AzDoApplicationNameFieldRef),
             fitGap: normalizeText(constants.AzDoFitGapFieldRef),
             entity: normalizeText(constants.AzDoEntityFieldRef),
+            linked: normalizeText(constants.AzDoLinkedToFeatureFieldRef),
+            
         };
     }
 
@@ -344,6 +346,9 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
     async function adoGet(url, params) {
         return doRequest({ url, method: "GET", headers: adoHeaders(), params });
+    }
+    async function adoPost(url, requestBody, params) {
+        return doRequest({ url, method: "POST", headers: adoHeaders(), requestBody, params });
     }
 
     async function getFieldDefinitions(objectType) {
@@ -544,7 +549,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     async function fetchAdoWorkItem(workItemId, requirementContext = null) {
         const url = `${constants.AzDoProjectURL}/_apis/wit/workitems/${workItemId}`;
         try {
-            return await adoGet(url, { "api-version": "7.1-preview.3" });
+            return await adoGet(url, { "api-version": "7.1-preview.3", "$expand": "relations" });
         } catch (error) {
             emitFriendlyFailure({
                 platform: "Azure DevOps",
@@ -620,7 +625,115 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         return match ? Number(match[1]) : null;
     }
 
-    function buildRequirementProperties(desiredState) {
+    async function fetchRelatedWorkItemIds(workItemId) {
+    const url = `${constants.AzDoProjectURL}/_apis/wit/workitems/${workItemId}`;
+   
+    const headers = {
+        "Authorization": `Basic ${Buffer.from(`:${constants.AZDO_TOKEN}`).toString("base64")}`,
+        "Content-Type": "application/json"
+    };
+
+    try {
+         
+    //     const response = await doRequest(url, "GET", null, headers, {
+    //     "$expand": "relations",
+    //     "api-version": "7.0"
+    // },);
+     const response = await adoGet(url, {   "$expand": "relations", "api-version": "7.0" });
+         console.log("[Debug] Work item details response:", safeJson(response));
+        
+
+        const relations = response?.relations || [];
+
+        
+
+        console.log("[Debug] revision relations:", relations);
+
+        const ids = relations
+            .map(r => {
+                const match = r.url?.match(/workItems\/(\d+)/);
+                return match ? match[1] : null;
+            })
+            .filter(Boolean);
+
+        console.log("[Debug] extracted IDs:", ids);
+
+        if (ids.length === 0) return "";
+
+        // ✅ CALL BATCH API
+        const batchResponse = await fetchWorkItemsBatch(ids);
+
+        const workItems = batchResponse?.value || [];
+
+        console.log("[Debug] batch count:", workItems.length);
+
+        // ✅ FILTER TYPES
+        const allowedTypes = new Set([ "Feature"]);
+
+        const filteredIds = workItems
+            .filter(wi => allowedTypes.has(wi?.fields?.["System.WorkItemType"]))
+            .map(wi => wi.id);
+
+        console.log("[Debug] filtered IDs:", filteredIds);
+
+        return filteredIds.join(",");
+     
+    } catch (err) {
+        console.error("[Error] revisions fetch failed:", err.message);
+        return "";
+    }
+}
+async function fetchWorkItemsBatch(ids) {
+    const url =`${constants.AzDoProjectURL}/_apis/wit/workitemsbatch?api-version=7.0`;
+
+    const headers = {
+        "Authorization": `Basic ${Buffer.from(`:${constants.AZDO_TOKEN}`).toString("base64")}`,
+        "Content-Type": "application/json"
+    };
+    
+    const body = {
+        ids: ids,
+        fields: [
+            "System.Id",
+            "System.WorkItemType"
+        ]
+    };
+
+   // return await doRequest(url, "POST", headers, body, null);
+   return await adoPost(url, body, null);
+    console.log("[Debug] Batch API response:", safeJson(response));
+}
+async function getFilteredWorkItemIds(commaSeparatedIds) {
+    if (!commaSeparatedIds) return "";
+
+    const ids = commaSeparatedIds
+        .split(",")
+        .map(id => parseInt(id.trim()))
+        .filter(Boolean);
+
+    if (ids.length === 0) return "";
+
+    const response = await fetchWorkItemsBatch(ids);
+
+    const workItems = response?.value || [];
+
+    console.log("[Debug] Batch response count:", workItems.length);
+
+    const allowedTypes = new Set([
+        "Requirement",
+        "RICEFW"
+    ]);
+
+    const filteredIds = workItems
+        .filter(wi => allowedTypes.has(wi?.fields?.["System.WorkItemType"]))
+        .map(wi => wi.id);
+
+    console.log("[Debug] filtered IDs:", filteredIds);
+
+    return filteredIds.join(",");
+}
+
+    async function buildRequirementProperties(desiredState) {
         const properties = [
             { field_id: constants.RequirementDescriptionFieldID, field_value: desiredState.description },
             { field_id: constants.RequirementStreamSquadFieldID, field_value: desiredState.areaPath },
@@ -660,11 +773,35 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             properties.push({ field_id: constants.RequirementBPEntityFieldID, field_value: desiredState.bpEntityValue });
         }
 
+            console.log("[Debug] workItemId:", desiredState.workItemId);
+
+        if (desiredState.workItemId) {
+            console.log("[Debug] workItemId:", desiredState.workItemId);
+
+        const relatedIdsString = await fetchRelatedWorkItemIds(desiredState.workItemId);
+
+        console.log("[Debug] relatedIdsString:", relatedIdsString);
+        console.log("[Debug] typeof:", typeof relatedIdsString);
+
+            console.log("[Debug] relatedIdsString:", relatedIdsString);
+
+            if (relatedIdsString) {
+                console.log("[Debug] Pushing linked feature requirement");
+
+                properties.push({
+                    field_id: constants.RequirementLinkedFeatureRequirement,
+                    field_value: relatedIdsString
+                });
+            } else {
+                console.log("[Debug] No related IDs found");
+            }
+        } 
+
         return properties;
     }
 
-    function evaluateRequirementUpdate(requirementDetails, desiredState) {
-        const desiredProperties = buildRequirementProperties(desiredState);
+    async function evaluateRequirementUpdate(requirementDetails, desiredState) {
+        const desiredProperties = await buildRequirementProperties(desiredState);
         const requestBody = { name: desiredState.name, properties: desiredProperties };
         const changedFields = [];
 
@@ -720,6 +857,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         const adoApplicationName = getAdoFieldValue(fields, adoFieldRefs.applicationName);
         const adoFitGap = getAdoFieldValue(fields, adoFieldRefs.fitGap);
         const adoEntity = getAdoFieldValue(fields, adoFieldRefs.entity);
+        const adoLinkedFeature = getAdoFieldValue(fields, adoFieldRefs.linked);
         const adoAssignedTo = firstNonEmpty(fields[adoFieldRefs.assignedTo]);
 
         logDivider("EXTRACTED ADO FIELDS");
@@ -837,7 +975,29 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
                 if (resolution.warningDetails) warnings.push(resolution.warningDetails);
             }
         }
-
+        let RequirementLinkedFeatureValue = null;
+        if (adoLinkedFeature !== undefined && adoLinkedFeature !== null && adoLinkedFeature !== "") {
+            if (!normalizeText(constants.RequirementLinkedFeatureRequirement)) {
+                warnings.push({
+                    platform: "Pulse",
+                    objectType: "Configuration",
+                    objectId: requirementContext?.id || workItemId || "Unknown",
+                    objectPid: requirementContext?.pid,
+                    fieldName: "RequirementLinkedFeatureRequirement",
+                    detail: "Linked Feature has a source value but the qTest field id constant is not configured. The field was left unchanged.",
+                    dedupKey: `requirement-migration-config-warning:linkedfeature:${workItemId}`,
+                });
+            } else {
+                const resolution = await resolveOptionalRequirementFieldValue(
+                    constants.RequirementLinkedFeatureRequirement,
+                    adoLinkedFeature,
+                    "Linked Feature",
+                    requirementContext
+                );
+                RequirementLinkedFeatureValue = resolution.value;
+                if (resolution.warningDetails) warnings.push(resolution.warningDetails);
+            }
+        }
         return {
             workItemId,
             name: buildRequirementName(workItemId, workItem),
@@ -852,6 +1012,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             applicationNameValue,
             fitGapValue,
             bpEntityValue,
+            RequirementLinkedFeatureValue,
             targetModuleId: await ensureModulePath(adoAreaPath, adoIterationPath),
             warnings,
         };
@@ -920,8 +1081,9 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         }
 
         const workItem = await fetchAdoWorkItem(workItemId, requirementDetails);
+        console.log(workItem,"workItem");
         const desiredState = await buildDesiredRequirementState(workItem, requirementDetails);
-        const evaluation = evaluateRequirementUpdate(requirementDetails, desiredState);
+        const evaluation = await evaluateRequirementUpdate(requirementDetails, desiredState);
         const updateResult = await updateRequirement(requirementDetails, desiredState, evaluation);
 
         console.log(`[Info] Requirement '${requirementId}' processed with work item '${workItemId}'. Updated='${updateResult.updated}'.`);

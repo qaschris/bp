@@ -83,6 +83,13 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         }
     }
 
+    function getRequirementTestingStatusFieldId() {
+        return firstNonEmpty(
+            normalizeText(constants.RequirementStatusFieldID),
+            normalizeText(constants.RequirementTestingStatusFieldID)
+        );
+    }
+
     function pushConfiguredTextProperty(properties, fieldId, fieldValue) {
         if (!normalizeText(fieldId)) return;
 
@@ -246,15 +253,14 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         "Content-Type": "application/json",
         Authorization: `bearer ${constants.QTEST_TOKEN}`,
     };
-
     function getADOHeaders() {
-        const token = Buffer.from(`:${constants.AZDO_TOKEN}`).toString("base64");
+        const token = Buffer.from(":" + constants.AZDO_TOKEN).toString("base64");
+
         return {
             "Content-Type": "application/json",
-            Authorization: `Basic ${token}`,
+            "Authorization": `Basic ${token}`
         };
     }
-
     function normalizeBaseUrl(value) {
         const raw = normalizeText(value).replace(/\/+$/, "");
         if (!raw) throw new Error("A qTest base URL is required.");
@@ -506,7 +512,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         return normalizeAssignedTo(adoAssignedTo);
     }
 
-    async function doRequest(url, method, requestBody, headers = standardHeaders) {
+    async function doRequest(url, method, requestBody, headers = standardHeaders, params = null) {
         const opts = {
             url,
             method,
@@ -515,7 +521,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         if (requestBody !== undefined && requestBody !== null && method !== "GET") {
             opts.data = requestBody;
         }
-
+        if (params) opts.params = params;
         try {
             const response = await axios(opts);
             return response.data;
@@ -526,177 +532,11 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     }
 
     function post(url, requestBody) {
-        return doRequest(url, "POST", requestBody);
+        return doRequest(url, "POST", requestBody, standardHeaders);
     }
 
     function put(url, requestBody) {
-        return doRequest(url, "PUT", requestBody);
-    }
-
-    async function getQtestComments(requirementId) {
-        const url = `${normalizeBaseUrl(constants.ManagerURL)}/api/v3/projects/${constants.ProjectID}/requirements/${requirementId}/comments?size=1000&page=1`;
-        const response = await doRequest(url, "GET", null, standardHeaders);
-        return response?.items || [];
-    }
-
-    async function createQtestComment(requirementId, content) {
-        const url = `${normalizeBaseUrl(constants.ManagerURL)}/api/v3/projects/${constants.ProjectID}/requirements/${requirementId}/comments`;
-        return doRequest(url, "POST", { content }, standardHeaders);
-    }
-
-    async function updateQtestComment(requirementId, commentId, content) {
-        const url = `${normalizeBaseUrl(constants.ManagerURL)}/api/v3/projects/${constants.ProjectID}/requirements/${requirementId}/comments/${commentId}`;
-        return doRequest(url, "PUT", { content }, standardHeaders);
-    }
-
-    function normalizeCommentText(value) {
-        if (!value) return "";
-
-        return String(value)
-            .replace(/<style[\s\S]*?<\/style>/gi, "")
-            .replace(/<script[\s\S]*?<\/script>/gi, "")
-            .replace(/<\/div>|<\/li>|<\/p>/gi, "\r\n")
-            .replace(/<li>/gi, "- ")
-            .replace(/<br\s*\/?>/gi, "\r\n")
-            .replace(/<[^>]+>/gi, "")
-            .replace(/&nbsp;/gi, " ")
-            .replace(/\r?\n[ \t]*\r?\n[ \t]*/g, "\r\n")
-            .trim();
-    }
-
-    function formatCommentDate(value) {
-        if (!value) return "Unknown date";
-
-        const parsed = new Date(value);
-        return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toLocaleString();
-    }
-
-    function normalizeStoredCommentContent(value) {
-        return String(value || "")
-            .replace(/\r\n/g, "\n")
-            .trim();
-    }
-
-    function buildAdoCommentContent(comment) {
-        const marker = `[CID:${comment.commentId}]`;
-        const author =
-            normalizeText(comment.author) ||
-            "Unknown";
-        const date = formatCommentDate(comment.createdDate);
-
-        return `[From ADO]
-${author} - ${date}
-${comment.commentText}
-
-${marker}`;
-    }
-
-    async function extractAllComments(workItemId) {
-        const url = `${constants.AzDoProjectURL}/_apis/wit/workItems/${workItemId}/comments?api-version=7.0-preview.3`;
-        const maxAttempts = 3;
-
-        for (let attempt = 0; attempt < maxAttempts; attempt++) {
-            try {
-                const response = await doRequest(url, "GET", null, getADOHeaders());
-                const comments = response?.comments || [];
-
-                if (comments.length > 0) {
-                    console.log(`[Info] Fetched ${comments.length} comments`);
-                    return comments
-                        .map(comment => ({
-                            commentText: normalizeCommentText(comment?.text),
-                            commentId: comment.id,
-                            author:
-                                comment?.createdBy?.displayName ||
-                                comment?.createdOnBehalfOf?.displayName ||
-                                comment?.revisedBy?.displayName ||
-                                comment?.modifiedBy?.displayName ||
-                                "",
-                            createdDate:
-                                comment?.createdOnBehalfDate ||
-                                comment?.createdDate ||
-                                comment?.revisedDate ||
-                                comment?.modifiedDate ||
-                                null,
-                        }))
-                        .filter(comment => comment.commentText)
-                        ;
-                }
-
-                console.log("[Info] No comments yet, retrying...");
-            } catch (error) {
-                console.warn("[Warn] Comment fetch failed, retrying...");
-            }
-
-            await new Promise(resolve => setTimeout(resolve, 3000));
-        }
-
-        console.log("[Info] No comments found after retries");
-        return [];
-    }
-
-    function isCommentAdded(eventData) {
-        const newCount = eventData.resource?.revision?.fields?.["System.CommentCount"] || 0;
-        const oldCount = eventData.resource?.fields?.["System.CommentCount"]?.oldValue || 0;
-        return newCount > oldCount;
-    }
-
-    function hasCommentActivity(eventData) {
-        return isCommentAdded(eventData) || Boolean(eventData.resource?.revision?.commentVersionRef?.commentId);
-    }
-
-    async function syncCommentsIfNeeded(eventData, workItemId, qtestRequirementId) {
-        if (!qtestRequirementId) return;
-
-        if (!hasCommentActivity(eventData)) {
-            console.log("[Info] No comment change detected");
-            return;
-        }
-
-        console.log("[Info] Comment detected. Fetching all from API...");
-        const comments = await extractAllComments(workItemId);
-
-        if (comments.length === 0) {
-            console.log("[Info] No comment text found");
-            return;
-        }
-
-        let existing = [];
-        try {
-            existing = await getQtestComments(qtestRequirementId);
-        } catch (error) {
-            console.error("[Error] Failed to fetch qTest comments");
-            return;
-        }
-
-        for (const comment of comments) {
-            const marker = `[CID:${comment.commentId}]`;
-            const content = buildAdoCommentContent(comment);
-            const matchingComment = existing.find(existingComment => (existingComment.content || "").includes(marker));
-
-            try {
-                if (!matchingComment) {
-                    await createQtestComment(qtestRequirementId, content);
-                    existing.unshift({ content });
-                    console.log(`[Info] Comment ${comment.commentId} synced successfully`);
-                    continue;
-                }
-
-                const currentContent = normalizeStoredCommentContent(matchingComment.content);
-                const desiredContent = normalizeStoredCommentContent(content);
-
-                if (currentContent === desiredContent) {
-                    console.log(`[Info] Comment ${comment.commentId} already synced. Skipping...`);
-                    continue;
-                }
-
-                await updateQtestComment(qtestRequirementId, matchingComment.id, content);
-                matchingComment.content = content;
-                console.log(`[Info] Comment ${comment.commentId} updated successfully`);
-            } catch (error) {
-                console.error(`[Error] Failed to sync qTest comment for ${comment.commentId}`, error);
-            }
-        }
+        return doRequest(url, "PUT", requestBody, standardHeaders);
     }
 
     const moduleChildrenCache = {};
@@ -712,7 +552,7 @@ ${marker}`;
         const url = `https://${constants.ManagerURL}/api/v3/projects/${constants.ProjectID}/modules/${parentId}?expand=descendants`;
 
         try {
-            const response = await doRequest(url, "GET", null);
+            const response = await doRequest(url, "GET", null, standardHeaders);
 
             let items = [];
             if (Array.isArray(response?.children)) {
@@ -866,7 +706,7 @@ ${marker}`;
     async function getRequirementDetails(requirementId) {
         const url = `${normalizeBaseUrl(constants.ManagerURL)}/api/v3/projects/${constants.ProjectID}/requirements/${requirementId}`;
         try {
-            return await doRequest(url, "GET", null);
+            return await doRequest(url, "GET", null, standardHeaders);
         } catch (error) {
             emitFriendlyFailure({
                 platform: "qTest",
@@ -901,8 +741,110 @@ ${marker}`;
         };
         return normalizeValue(left) === normalizeValue(right);
     }
+    async function fetchRelatedWorkItemIds(workItemId) {
+        const url = `https://dev.azure.com/bp-digital/bp_Quantum/_apis/wit/workitems/${workItemId}`;
 
-    function buildRequirementProperties(desiredState) {
+        const headers = {
+            "Authorization": `Basic ${Buffer.from(`:${constants.AZDO_TOKEN}`).toString("base64")}`,
+            "Content-Type": "application/json"
+        };
+
+        try {
+            const response = await doRequest(url, "GET", null, headers, {
+                "$expand": "relations",
+                "api-version": "7.0"
+            });
+            //console.log("[Debug] Work item details response:", safeJson(response));
+
+
+            const relations = response?.relations || [];
+
+
+
+            console.log("[Debug] revision relations:", relations);
+
+            const ids = relations
+                .map(r => {
+                    const match = r.url?.match(/workItems\/(\d+)/);
+                    return match ? match[1] : null;
+                })
+                .filter(Boolean);
+
+            console.log("[Debug] extracted IDs:", ids);
+
+            if (ids.length === 0) return "";
+
+            // ✅ CALL BATCH API
+            const batchResponse = await fetchWorkItemsBatch(ids);
+
+            const workItems = batchResponse?.value || [];
+
+            console.log("[Debug] batch count:", workItems.length);
+
+            // ✅ FILTER TYPES
+            const allowedTypes = new Set(["Requirement", "RICEFW"]);
+
+            const filteredIds = workItems
+                .filter(wi => allowedTypes.has(wi?.fields?.["System.WorkItemType"]))
+                .map(wi => wi.id);
+
+            console.log("[Debug] filtered IDs:", filteredIds);
+
+            return filteredIds.join(",");
+
+        } catch (err) {
+            console.error("[Error] revisions fetch failed:", err.message);
+            return "";
+        }
+    }
+    async function fetchWorkItemsBatch(ids) {
+        const url = `https://dev.azure.com/bp-digital/bp_Quantum/_apis/wit/workitemsbatch?api-version=7.0`;
+
+        const headers = {
+            "Authorization": `Basic ${Buffer.from(`:${constants.AZDO_TOKEN}`).toString("base64")}`,
+            "Content-Type": "application/json"
+        };
+
+        const body = {
+            ids: ids,
+            fields: [
+                "System.Id",
+                "System.WorkItemType"
+            ]
+        };
+
+        return await doRequest(url, "POST", body, headers);
+    }
+    async function getFilteredWorkItemIds(commaSeparatedIds) {
+        if (!commaSeparatedIds) return "";
+
+        const ids = commaSeparatedIds
+            .split(",")
+            .map(id => parseInt(id.trim()))
+            .filter(Boolean);
+
+        if (ids.length === 0) return "";
+
+        const response = await fetchWorkItemsBatch(ids);
+
+        const workItems = response?.value || [];
+
+        console.log("[Debug] Batch response count:", workItems.length);
+
+        const allowedTypes = new Set([
+            "Requirement"
+
+        ]);
+
+        const filteredIds = workItems
+            .filter(wi => allowedTypes.has(wi?.fields?.["System.WorkItemType"]))
+            .map(wi => wi.id);
+
+        console.log("[Debug] filtered IDs:", filteredIds);
+
+        return filteredIds.join(",");
+    }
+    async function buildRequirementProperties(desiredState) {
         const properties = [
             { field_id: constants.RequirementDescriptionFieldID, field_value: desiredState.description },
             { field_id: constants.RequirementStreamSquadFieldID, field_value: desiredState.areaPath },
@@ -929,12 +871,39 @@ ${marker}`;
         if (desiredState.ricefwConfigurationValue) {
             properties.push({ field_id: constants.RequirementRICEFWConfigurationFieldID, field_value: desiredState.ricefwConfigurationValue });
         }
+        // Call the curl wrapper dynamically using desiredState.workItemId
+        console.log("[Debug] workItemId:", desiredState.workItemId);
+
+        if (desiredState.workItemId) {
+            console.log("[Debug] workItemId:", desiredState.workItemId);
+
+            const relatedIdsString = await fetchRelatedWorkItemIds(desiredState.workItemId);
+
+            console.log("[Debug] relatedIdsString:", relatedIdsString);
+            console.log("[Debug] typeof:", typeof relatedIdsString);
+
+            console.log("[Debug] relatedIdsString:", relatedIdsString);
+
+            if (relatedIdsString) {
+                console.log("[Debug] Pushing linked feature requirement");
+
+                properties.push({
+                    field_id: constants.RequirementLinkedFeatureRequirement,
+                    field_value: relatedIdsString
+                });
+            } else {
+                console.log("[Debug] No related IDs found");
+            }
+        }
+
+
+        pushConfiguredResolvedProperty(properties, getRequirementTestingStatusFieldId(), desiredState.testingStatusValue);
 
         return properties;
     }
 
-    function evaluateRequirementUpdate(requirementDetails, desiredState) {
-        const desiredProperties = buildRequirementProperties(desiredState);
+   async function evaluateRequirementUpdate(requirementDetails, desiredState) {
+        const desiredProperties = await buildRequirementProperties(desiredState);
         const requestBody = { name: desiredState.name, properties: desiredProperties };
         const changedFields = [];
 
@@ -970,6 +939,171 @@ ${marker}`;
             });
         }
     }
+    async function createQtestComment(requirementId, content) {
+        const url = `https://${constants.ManagerURL}/api/v3/projects/${constants.ProjectID}/requirements/${requirementId}/comments`;
+        const res = await doRequest(url, "POST", { content }, standardHeaders);
+        console.log("[Debug] qTest comment creation response:", safeJson(res));
+        return res;
+    }
+     async function updateQtestComment(requirementId, commentId, content) {
+        const url = `${normalizeBaseUrl(constants.ManagerURL)}/api/v3/projects/${constants.ProjectID}/requirements/${requirementId}/comments/${commentId}`;
+        return doRequest(url, "PUT", { content }, standardHeaders);
+    }
+    async function getQtestComments(requirementId) {
+        const url = `https://${constants.ManagerURL}/api/v3/projects/${constants.ProjectID}/requirements/${requirementId}/comments`;
+        console.log(url);
+        const res = await doRequest(url, "GET", null, standardHeaders);
+        return res?.items || [];
+    }
+       function normalizeCommentText(value) {
+        if (!value) return "";
+
+        return String(value)
+            .replace(/<style[\s\S]*?<\/style>/gi, "")
+            .replace(/<script[\s\S]*?<\/script>/gi, "")
+            .replace(/<\/div>|<\/li>|<\/p>/gi, "\r\n")
+            .replace(/<li>/gi, "- ")
+            .replace(/<br\s*\/?>/gi, "\r\n")
+            .replace(/<[^>]+>/gi, "")
+            .replace(/&nbsp;/gi, " ")
+            .replace(/\r?\n[ \t]*\r?\n[ \t]*/g, "\r\n")
+            .trim();
+    }
+
+    function formatCommentDate(value) {
+        if (!value) return "Unknown date";
+
+        const parsed = new Date(value);
+        return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toLocaleString();
+    }
+
+    function normalizeStoredCommentContent(value) {
+        return String(value || "")
+            .replace(/\r\n/g, "\n")
+            .trim();
+    }
+
+    function buildAdoCommentContent(comment) {
+        const marker = `[CID:${comment.commentId}]`;
+        const author =
+            normalizeText(comment.author) ||
+            "Unknown";
+        const date = formatCommentDate(comment.createdDate);
+
+        return `[From ADO]
+${author} - ${date}
+${comment.commentText}
+
+${marker}`;
+    }
+    async function extractAllComments(workItemId) {
+        const url = `${constants.AzDoProjectURL}/_apis/wit/workItems/${workItemId}/comments?api-version=7.0-preview.3`;
+        const maxAttempts = 3;
+
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+            try {
+                const response = await doRequest(url, "GET", null, getADOHeaders());
+                const comments = response?.comments || [];
+               
+                if (comments.length > 0) {
+                    console.log(`[Info] Fetched ${comments.length} comments`);
+                    return comments
+                        .map(comment => ({
+                            commentText: normalizeCommentText(comment?.text),
+                            commentId: comment.id,
+                            author:
+                                comment?.createdBy?.displayName ||
+                                comment?.createdOnBehalfOf?.displayName ||
+                                comment?.revisedBy?.displayName ||
+                                comment?.modifiedBy?.displayName ||
+                                "",
+                            createdDate:
+                                comment?.createdOnBehalfDate ||
+                                comment?.createdDate ||
+                                comment?.revisedDate ||
+                                comment?.modifiedDate ||
+                                null,
+                        }))
+                        .filter(comment => comment.commentText)
+                        ;
+                }
+
+                console.log("[Info] No comments yet, retrying...");
+            } catch (error) {
+                console.warn("[Warn] Comment fetch failed, retrying...");
+            }
+
+            await new Promise(resolve => setTimeout(resolve, 3000));
+        }
+
+        console.log("[Info] No comments found after retries");
+        return [];
+    }
+    // Detect if comment was added
+    function isCommentAdded(event) {
+        const newCount = event.resource?.revision?.fields?.["System.CommentCount"] || 0;
+        const oldCount = event.resource?.fields?.["System.CommentCount"]?.oldValue || 0;
+
+        return newCount > oldCount;
+    }
+     function hasCommentActivity(eventData) {
+        return isCommentAdded(eventData) || Boolean(eventData.resource?.revision?.commentVersionRef?.commentId);
+    }
+
+ async function syncCommentsIfNeeded(eventData, workItemId, qtestRequirementId) {
+        if (!qtestRequirementId) return;
+
+        if (!hasCommentActivity(eventData)) {
+            console.log("[Info] No comment change detected");
+            return;
+        }
+
+        console.log("[Info] Comment detected. Fetching all from API...");
+        const comments = await extractAllComments(workItemId);
+
+        if (comments.length === 0) {
+            console.log("[Info] No comment text found");
+            return;
+        }
+
+        let existing = [];
+        try {
+            existing = await getQtestComments(qtestRequirementId);
+        } catch (error) {
+            console.error("[Error] Failed to fetch qTest comments");
+            return;
+        }
+
+        for (const comment of comments) {
+            const marker = `[CID:${comment.commentId}]`;
+            const content = buildAdoCommentContent(comment);
+            const matchingComment = existing.find(existingComment => (existingComment.content || "").includes(marker));
+
+            try {
+                if (!matchingComment) {
+                    await createQtestComment(qtestRequirementId, content);
+                    existing.unshift({ content });
+                    console.log(`[Info] Comment ${comment.commentId} synced successfully`);
+                    continue;
+                }
+
+                const currentContent = normalizeStoredCommentContent(matchingComment.content);
+                const desiredContent = normalizeStoredCommentContent(content);
+
+                if (currentContent === desiredContent) {
+                    console.log(`[Info] Comment ${comment.commentId} already synced. Skipping...`);
+                    continue;
+                }
+
+                await updateQtestComment(qtestRequirementId, matchingComment.id, content);
+                matchingComment.content = content;
+                console.log(`[Info] Comment ${comment.commentId} updated successfully`);
+            } catch (error) {
+                console.error(`[Error] Failed to sync qTest comment for ${comment.commentId}`, error);
+            }
+        }
+    }
+
 
     async function buildDesiredRequirementState(eventData, requirementContext = null) {
         const fields = getFields(eventData);
@@ -1023,7 +1157,7 @@ ${marker}`;
 
     async function updateRequirement(requirementToUpdate, desiredState) {
         const requirementDetails = await getRequirementDetails(requirementToUpdate.id);
-        const evaluation = evaluateRequirementUpdate(requirementDetails, desiredState);
+        const evaluation = await evaluateRequirementUpdate(requirementDetails, desiredState);
         if (!evaluation.needsUpdate) {
             console.log(`[Info] RICEFW requirement '${requirementToUpdate.id}' is already in sync. Skipping update.`);
             emitWarnings(desiredState.warnings, requirementDetails, desiredState.workItemId);
@@ -1034,10 +1168,15 @@ ${marker}`;
         const url = `${normalizeBaseUrl(constants.ManagerURL)}/api/v3/projects/${constants.ProjectID}/requirements/${requirementToUpdate.id}${query}`;
 
         try {
-            const updated = await put(url, evaluation.requestBody);
+            await put(url, evaluation.requestBody);
             console.log(`[Info] RICEFW requirement '${requirementToUpdate.id}' updated.`);
+            // Sync comments after requirement update
+            try {
+                await syncCommentsIfNeeded(event, desiredState.workItemId, requirementToUpdate.id);
+            } catch (err) {
+                console.error("[Error] Comment sync failed after update", err);
+            }
             emitWarnings(desiredState.warnings, requirementDetails, desiredState.workItemId);
-            return updated || requirementDetails;
         } catch (error) {
             emitFriendlyFailure({
                 platform: "qTest",
@@ -1056,14 +1195,19 @@ ${marker}`;
         const requestBody = {
             name: desiredState.name,
             parent_id: desiredState.targetModuleId,
-            properties: buildRequirementProperties(desiredState),
+            properties: await buildRequirementProperties(desiredState),
         };
 
         try {
-            const created = await post(url, requestBody);
+            await post(url, requestBody);
             console.log("[Info] RICEFW requirement created.");
+            //  Sync comments after requirement creation
+            try {
+                await syncCommentsIfNeeded(event, desiredState.workItemId, response?.id);
+            } catch (err) {
+                console.error("[Error] Comment sync failed after creation", err);
+            }
             emitWarnings(desiredState.warnings, null, desiredState.workItemId);
-            return created;
         } catch (error) {
             emitFriendlyFailure({
                 platform: "qTest",
@@ -1114,10 +1258,9 @@ ${marker}`;
             case eventType.UPDATED:
                 workItemId = event?.resource?.workItemId;
                 console.log(`[Info] Update RICEFW Feature event received for 'WI${workItemId}'`);
-                const commentChanged = hasCommentActivity(event);
+                 const commentChanged = hasCommentActivity(event);
                 const shouldProcessUpdate = shouldProcessRicefwUpdate(event);
-                if (!shouldProcessUpdate && !commentChanged) return;
-                {
+            
                     const getReqResult = await getRequirementByWorkItemId(workItemId);
                     if (getReqResult.failed) return;
                     const allowCreationOnUpdate = String(constants.AllowCreationOnUpdate).toLowerCase() === "true";
@@ -1126,6 +1269,13 @@ ${marker}`;
                         return;
                     }
                     requirementToUpdate = getReqResult.requirement;
+                if (requirementToUpdate && !shouldProcessUpdate && !commentChanged) return;
+                if (isCommentAdded(event)) {
+                    const workItemId = event.resource.workItemId;
+                    const { requirement } = await getRequirementByWorkItemId(workItemId);
+                    if (requirement) {
+                        await syncCommentsIfNeeded(event, workItemId, requirement.id);
+                    }
                 }
                 break;
 
@@ -1170,8 +1320,7 @@ ${marker}`;
             }
             return;
         }
-
-        const isCreatingRequirement = !requirementToUpdate;
+         const isCreatingRequirement = !requirementToUpdate;
         const desiredState = await buildDesiredRequirementState(event, requirementToUpdate);
         console.log(`[Debug] RICEFW Requirement Name: ${desiredState.name}`);
         console.log(`[Debug] RICEFW Requirement Description: ${desiredState.description}`);

@@ -270,9 +270,11 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         console.log(`==================== ${title} ====================`);
     }
 
-    async function doRequest(url, method, requestBody, headers = standardHeaders) {
+    async function doRequest(url, method, requestBody, headers = standardHeaders, params = null) {
         const opts = { url, method, headers };
         if (requestBody !== undefined && requestBody !== null && method !== "GET") opts.data = requestBody;
+        if (params) opts.params = params;
+ 
 
         try {
             const response = await axios(opts);
@@ -281,6 +283,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             console.error("[Error] HTTP request failed.");
             console.error(`[Error] URL: ${url}`);
             console.error(`[Error] Method: ${method}`);
+             console.log("[Debug] Params:", params);
             console.error(`[Error] Message: ${error.message}`);
             if (error.response) {
                 console.error(`[Error] HTTP Status: ${error.response.status}`);
@@ -767,8 +770,135 @@ ${marker}`;
 
         return normalizeValue(left) === normalizeValue(right);
     }
+    // Utility: fetch related work item IDs from ADO
+    async function fetchViaWiql(workItemId, headers) {
+    const wiqlUrl =
+        "https://dev.azure.com/bp-digital/bp_Quantum/_apis/wit/wiql?api-version=7.0";
 
-    function buildRequirementProperties(desiredState) {
+    const body = {
+        query: `
+            SELECT [System.Id]
+            FROM WorkItemLinks
+            WHERE
+                (Source.[System.Id] = ${workItemId})
+                AND ([System.Links.LinkType] = 'System.LinkTypes.Related')
+        `
+    };
+
+    const result = await doRequest(wiqlUrl, "POST", body, headers);
+
+    const ids = result?.workItemRelations
+        ?.map(r => r?.target?.id)
+        ?.filter(Boolean) || [];
+
+    console.log("[Debug] WIQL related IDs:", ids);
+
+    return ids.join(",");
+}
+async function fetchRelatedWorkItemIds(workItemId) {
+    const url = `https://dev.azure.com/bp-digital/bp_Quantum/_apis/wit/workitems/${workItemId}`;
+   
+    const headers = {
+        "Authorization": `Basic ${Buffer.from(`:${constants.AZDO_TOKEN}`).toString("base64")}`,
+        "Content-Type": "application/json"
+    };
+
+    try {
+        const response = await doRequest(url, "GET", null, headers, {
+        "$expand": "relations",
+        "api-version": "7.0"
+    });
+         //console.log("[Debug] Work item details response:", safeJson(response));
+        
+
+        const relations = response?.relations || [];
+
+        
+
+        console.log("[Debug] revision relations:", relations);
+
+        const ids = relations
+            .map(r => {
+                const match = r.url?.match(/workItems\/(\d+)/);
+                return match ? match[1] : null;
+            })
+            .filter(Boolean);
+
+        console.log("[Debug] extracted IDs:", ids);
+
+        if (ids.length === 0) return "";
+
+        // ✅ CALL BATCH API
+        const batchResponse = await fetchWorkItemsBatch(ids);
+
+        const workItems = batchResponse?.value || [];
+
+        console.log("[Debug] batch count:", workItems.length);
+
+        // ✅ FILTER TYPES
+        const allowedTypes = new Set([ "Feature"]);
+
+        const filteredIds = workItems
+            .filter(wi => allowedTypes.has(wi?.fields?.["System.WorkItemType"]))
+            .map(wi => wi.id);
+
+        console.log("[Debug] filtered IDs:", filteredIds);
+
+        return filteredIds.join(",");
+     
+    } catch (err) {
+        console.error("[Error] revisions fetch failed:", err.message);
+        return "";
+    }
+}
+async function fetchWorkItemsBatch(ids) {
+    const url = `https://dev.azure.com/bp-digital/bp_Quantum/_apis/wit/workitemsbatch?api-version=7.0`;
+
+    const headers = {
+        "Authorization": `Basic ${Buffer.from(`:${constants.AZDO_TOKEN}`).toString("base64")}`,
+        "Content-Type": "application/json"
+    };
+    
+    const body = {
+        ids: ids,
+        fields: [
+            "System.Id",
+            "System.WorkItemType"
+        ]
+    };
+
+    return await doRequest(url, "POST", body, headers);
+}
+async function getFilteredWorkItemIds(commaSeparatedIds) {
+    if (!commaSeparatedIds) return "";
+
+    const ids = commaSeparatedIds
+        .split(",")
+        .map(id => parseInt(id.trim()))
+        .filter(Boolean);
+
+    if (ids.length === 0) return "";
+
+    const response = await fetchWorkItemsBatch(ids);
+
+    const workItems = response?.value || [];
+
+    console.log("[Debug] Batch response count:", workItems.length);
+
+    const allowedTypes = new Set([
+        "Requirement",
+        "RICEFW"
+    ]);
+
+    const filteredIds = workItems
+        .filter(wi => allowedTypes.has(wi?.fields?.["System.WorkItemType"]))
+        .map(wi => wi.id);
+
+    console.log("[Debug] filtered IDs:", filteredIds);
+
+    return filteredIds.join(",");
+}
+  async  function buildRequirementProperties(desiredState) {
         const properties = [
             { field_id: constants.RequirementDescriptionFieldID, field_value: desiredState.description },
             { field_id: constants.RequirementStreamSquadFieldID, field_value: desiredState.areaPath },
@@ -808,11 +938,40 @@ ${marker}`;
             properties.push({ field_id: constants.RequirementBPEntityFieldID, field_value: desiredState.bpEntityValue });
         }
 
-        return properties;
+        
+      // Call the curl wrapper dynamically using desiredState.workItemId
+    console.log("[Debug] workItemId:", desiredState.workItemId);
+
+if (desiredState.workItemId) {
+    console.log("[Debug] workItemId:", desiredState.workItemId);
+
+const relatedIdsString = await fetchRelatedWorkItemIds(desiredState.workItemId);
+
+console.log("[Debug] relatedIdsString:", relatedIdsString);
+console.log("[Debug] typeof:", typeof relatedIdsString);
+
+    console.log("[Debug] relatedIdsString:", relatedIdsString);
+
+    if (relatedIdsString) {
+        console.log("[Debug] Pushing linked feature requirement");
+
+        properties.push({
+            field_id: constants.RequirementLinkedFeatureRequirement,
+            field_value: relatedIdsString
+        });
+    } else {
+        console.log("[Debug] No related IDs found");
+    }
+} 
+
+    // If no workItemId, just return properties immediately
+    //return Promise.resolve(properties);
+    return properties;
     }
 
-    function evaluateRequirementUpdate(requirementDetails, desiredState) {
-        const desiredProperties = buildRequirementProperties(desiredState);
+    async function evaluateRequirementUpdate(requirementDetails, desiredState) {
+        const desiredProperties = await buildRequirementProperties(desiredState);
+        console.log(desiredProperties,"desired properties");
         const requestBody = { name: desiredState.name, properties: desiredProperties };
         const changedFields = [];
 
@@ -1001,7 +1160,7 @@ ${marker}`;
 
     async function updateRequirement(requirementToUpdate, desiredState) {
         const requirementDetails = await getRequirementDetails(requirementToUpdate.id);
-        const evaluation = evaluateRequirementUpdate(requirementDetails, desiredState);
+        const evaluation = await evaluateRequirementUpdate(requirementDetails, desiredState);
 
         if (!evaluation.needsUpdate) {
             console.log(`[Info] Requirement '${requirementToUpdate.id}' is already in sync. Skipping update.`);
@@ -1034,10 +1193,11 @@ ${marker}`;
         const requestBody = {
             name: desiredState.name,
             parent_id: desiredState.targetModuleId,
-            properties: buildRequirementProperties(desiredState),
+            properties: await buildRequirementProperties(desiredState),
         };
 
         try {
+            console.log(requestBody,"createRequirement"); 
             const created = await post(url, requestBody);
             emitWarnings(desiredState.warnings, created, desiredState.workItemId);
             return created;
