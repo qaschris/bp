@@ -898,10 +898,10 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     function mapPriority(qtestPriority) {
         const priorityId = parseInt(qtestPriority);
         switch (priorityId) {
-            case 10898: return 1;
-            case 10204: return 2;
-            case 10203: return 3;
-            case 10202: return 4;
+            case 10898: return '4 - Critical';
+            case 10204: return '3 - High';
+            case 10203: return '2 - Medium';
+            case 10202: return '1 - Low';
             default: return 3;
         }
     }
@@ -1049,7 +1049,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         const requestBody = [
             buildFieldPatchOperation(adoFieldRefs.title, name),
             buildFieldPatchOperation(adoFieldRefs.reproSteps, description),
-            buildFieldPatchOperation(adoFieldRefs.tags, "qTest-Dev"),
+            buildFieldPatchOperation(adoFieldRefs.tags, "qTest"),
             buildFieldPatchOperation(adoFieldRefs.state, mappedStatus),
             buildFieldPatchOperation(adoFieldRefs.severity, mappedSeverity),
             buildFieldPatchOperation(adoFieldRefs.priority, mappedPriority),
@@ -1245,7 +1245,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     }
 
     function buildAdoTags(defectPid) {
-        const tags = ["qTest-Dev"];
+        const tags = ["qTest"];
         const normalizedPid = normalizeText(defectPid);
         if (normalizedPid) {
             tags.push(normalizedPid);

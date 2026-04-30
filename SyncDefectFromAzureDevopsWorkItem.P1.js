@@ -655,10 +655,10 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
     function mapAdoPriorityToQtestValue(adoPriority) {
         const priorityMap = {
-            1: 10898,
-            2: 10204,
-            3: 10203,
-            4: 10202,
+            '4 - Critical': 10898,
+            '3 - High': 10204,
+            '2 - Medium': 10203,
+            '1 - Low': 10202,
         };
 
         return priorityMap[adoPriority] || null;

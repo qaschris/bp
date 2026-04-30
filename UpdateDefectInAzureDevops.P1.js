@@ -923,10 +923,10 @@ ${text}<br><br>[CID:${commentId}]`;
     function mapPriority(qtestPriority) {
       const priorityId = parseInt(qtestPriority, 10);
       switch (priorityId) {
-        case 10898: return 1;
-        case 10204: return 2;
-        case 10203: return 3;
-        case 10202: return 4;
+        case 10898: return "4 - Critical";
+        case 10204: return "3 - High";
+        case 10203: return "2 - Medium";
+        case 10202: return "1 - Low";
         default: return null;
       }
     }
