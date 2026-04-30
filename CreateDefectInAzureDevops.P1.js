@@ -887,7 +887,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     function mapSeverity(qtestSeverity) {
         const severityId = parseInt(qtestSeverity);
         switch (severityId) {
-            case 10301: return '1 - Critical';
+            case 10899: return '1 - Critical';
             case 10302: return '2 - High';
             case 10303: return '3 - Medium';
             case 10304: return '4 - Low';
@@ -898,7 +898,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     function mapPriority(qtestPriority) {
         const priorityId = parseInt(qtestPriority);
         switch (priorityId) {
-            case 11169: return 1;
+            case 10898: return 1;
             case 10204: return 2;
             case 10203: return 3;
             case 10202: return 4;
@@ -909,16 +909,16 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     function mapDefectType(qtestDefectType) {
         const id = parseInt(qtestDefectType);
         switch (id) {
-            case 956: return "New_Requirement";
-            case 957: return "Code";
-            case 958: return "Data";
-            case 959: return "Environment";
-            case 960: return "Infrastructure";
-            case 961: return "User Authorization";
-            case 962: return "Configuration";
-            case 963: return "User Handling";
-            case 964: return "Translation";
-            case 965: return "Automation";
+            case 1751: return "New_Requirement";
+            case 1752: return "Code";
+            case 1753: return "Data";
+            case 1754: return "Environment";
+            case 1792: return "Infrastructure";
+            case 1755: return "User Authorization";
+            case 1756: return "Configuration";
+            case 1757: return "User Handling";
+            case 1758: return "Translation";
+            case 1759: return "Automation";
             default: return null;
         }
     }
@@ -927,16 +927,16 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         const statusId = parseInt(qtestStatus);
         switch (statusId) {
             case 10001: return "New";
-            case 10002: return "In Analysis";
+            case 10003: return "In Analysis";
             case 10004: return "In Resolution";
-            case 10003: return "Awaiting Implementation";
-            case 10953: return "Resolved";
-            case 10880: return "Retest";
-            case 10882: return "Reopened";
-            case 10881: return "Closed";
-            case 10883: return "On Hold";
+            case 10005: return "Awaiting Implementation";
+            case 10006: return "Resolved";
+            case 10850: return "Retest";
+            case 10852: return "Reopened";
+            case 10851: return "Closed";
+            case 10002: return "On Hold";
             case 10853: return "Rejected";
-            case 11376: return "Triage";
+            case 11121: return "Triage";
             default: return "New";
         }
     }
@@ -944,15 +944,21 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     function mapAffectedRelease(qtestRelease) {
         const releaseId = parseInt(qtestRelease);
         switch (releaseId) {
-            case -510: return null;
-            case 283: return "P&O_R1_SIT Dry Run";
-            case 279: return "P&O_R1_SIT1";
-            case 280: return "P&O_R1_SIT2";
-            case 284: return "P&O_R1_DC1";
-            case 285: return "P&O_R1_DC2";
-            case 286: return "P&O_R1_DC3";
-            case 287: return "P&O_R1_UAT";
-            case 302: return "Unit Testing";
+            case -511: return null;
+            case -542: return null;
+            case 350: return "P&O_R1_SIT Dry Run";
+            case 310: return "P&O_R1_SIT1";
+            case 311: return "P&O_R1_SIT2";
+            case 312: return "P&O_R1_DC1";
+            case 347: return "P&O_R1_DC2";
+            case 348: return "P&O_R1_DC3";
+            case 351: return "P&O_R1_UAT";
+            case 393: return "Unit Testing";
+            case 387: return "P&O_R1.1_SIT";
+            case 388: return "P&O_R1.1_UAT";
+            case 428: return "P&O_R1.1_DC1";
+            case 429: return "P&O_R1.1_DC2";
+            case 430: return "P&O_R1.1_DC3";
             default: return null;
         }
     }

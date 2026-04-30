@@ -624,14 +624,19 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
     function mapAdoBugStageToQtestAffectedReleaseValue(adoBugStage) {
         const bugStageMap = {
-            "p&o_r1_sit dry run": 283,
-            "p&o_r1_sit1": 279,
-            "p&o_r1_sit2": 280,
-            "p&o_r1_dc1": 284,
-            "p&o_r1_dc2": 285,
-            "p&o_r1_dc3": 286,
-            "p&o_r1_uat": 287,
-            "unit testing": 302,
+            "p&o_r1_sit dry run": 350,
+            "p&o_r1_sit1": 310,
+            "p&o_r1_sit2": 311,
+            "p&o_r1_dc1": 312,
+            "p&o_r1_dc2": 347,
+            "p&o_r1_dc3": 348,
+            "p&o_r1_uat": 351,
+            "unit testing": 393,
+            "p&o_r1.1_sit": 387,
+            "p&o_r1.1_uat": 388,
+            "p&o_r1.1_dc1": 428,
+            "p&o_r1.1_dc2": 429,
+            "p&o_r1.1_dc3": 430,
         };
 
         return bugStageMap[normalizeLabel(adoBugStage)] || null;
@@ -639,7 +644,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
     function mapAdoSeverityToQtestValue(adoSeverity) {
         const severityMap = {
-            "1 - Critical": 10301,
+            "1 - Critical": 10899,
             "2 - High": 10302,
             "3 - Medium": 10303,
             "4 - Low": 10304,
@@ -650,7 +655,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
     function mapAdoPriorityToQtestValue(adoPriority) {
         const priorityMap = {
-            1: 11169,
+            1: 10898,
             2: 10204,
             3: 10203,
             4: 10202,
