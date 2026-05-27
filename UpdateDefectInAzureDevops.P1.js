@@ -667,6 +667,42 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         .trim();
     }
 
+    function normalizeComparableCommentText(value) {
+      return htmlToPlainText(value || "")
+        .replace(/\r\n/g, "\n")
+        .replace(/[ \t]+\n/g, "\n")
+        .replace(/\n[ \t]+/g, "\n")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim();
+    }
+
+    function parseManagedQtestAdoComment(value) {
+      const normalizedText = normalizeComparableCommentText(value);
+      if (!normalizedText) {
+        return {
+          marker: "",
+          bodyText: "",
+          text: "",
+        };
+      }
+
+      const markerMatch = normalizedText.match(/\[CID:(\d+)\]\s*$/i);
+      const marker = markerMatch ? `[CID:${markerMatch[1]}]` : "";
+      const withoutMarker = markerMatch
+        ? normalizedText.slice(0, markerMatch.index).trim()
+        : normalizedText;
+      const lines = withoutMarker.split("\n");
+      const bodyLines = lines[0]?.trim() === "[From qTest]"
+        ? lines.slice(Math.min(2, lines.length))
+        : lines;
+
+      return {
+        marker,
+        bodyText: normalizeComparableCommentText(bodyLines.join("\n")),
+        text: normalizedText,
+      };
+    }
+
     function buildLegacyQtestFormattedComment(content, author, createdDate, lastModifiedUser, lastModifiedDate) {
       const text = htmlToPlainText(content || "");
       const name = author || lastModifiedUser || "Unknown";
@@ -740,9 +776,10 @@ ${text}`;
         };
       }
 
-      const currentContent = normalizeStoredCommentContent(matchingComment.text);
-      const desiredContent = normalizeStoredCommentContent(formattedText);
-      if (currentContent === desiredContent) {
+      const expectedMarker = `[CID:${commentId}]`;
+      const currentComment = parseManagedQtestAdoComment(matchingComment.text);
+      const desiredBodyText = normalizeComparableCommentText(rawText);
+      if (currentComment.marker === expectedMarker && currentComment.bodyText === desiredBodyText) {
         return {
           action: "noop",
           commentId,
@@ -909,6 +946,79 @@ ${text}<br><br>[CID:${commentId}]`;
       return normalizeText(prop.field_value);
     }
 
+    async function getDefectFieldDefinitionById(fieldId) {
+      if (!fieldId) {
+        return null;
+      }
+
+      const fields = await getDefectFieldDefinitions();
+      return fields.find(field => String(field?.id) === String(fieldId)) || null;
+    }
+
+    async function searchQtestDefects(query, description) {
+      const url = `${normalizeBaseUrl(constants.ManagerURL)}/api/v3/projects/${constants.ProjectID}/search`;
+      const requestBody = {
+        object_type: "defects",
+        fields: ["*"],
+        query,
+      };
+
+      console.log(`[Info] Searching qTest defects by ${description}.`);
+      const response = await axios.post(url, requestBody, {
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${constants.QTEST_TOKEN}`,
+        },
+      });
+
+      return Array.isArray(response.data?.items) ? response.data.items : [];
+    }
+
+    async function shouldSkipDuplicateWorkItemTagUpdate(currentDefectId, currentDefectPid, workItemId) {
+      const workItemTagField = await getDefectFieldDefinitionById(constants.DefectWorkItemTagFieldID);
+      if (!workItemTagField) {
+        console.log("[Warn] Could not validate duplicate qTest work item tag usage because the configured tag field was not found.");
+        return false;
+      }
+
+      const workItemTag = `WI${workItemId}`;
+
+      try {
+        const matchingDefects = await searchQtestDefects(
+          `'${workItemTagField.label}' = '${workItemTag}'`,
+          `work item tag '${workItemTag}'`
+        );
+        const distinctDefectIds = [...new Set(matchingDefects.map(item => String(item?.id)).filter(Boolean))];
+        if (distinctDefectIds.length <= 1) {
+          return false;
+        }
+
+        const duplicateDefects = matchingDefects.filter(item => String(item?.id) !== String(currentDefectId));
+        if (!duplicateDefects.length) {
+          return false;
+        }
+
+        const duplicateSummary = duplicateDefects
+          .map(item => `${item?.id}${item?.pid ? ` (${item.pid})` : ""}`)
+          .join(", ");
+
+        console.log(
+          `[Warn] Duplicate qTest defects found for work item tag '${workItemTag}'. ` +
+          `Current defect '${currentDefectId}'${currentDefectPid ? ` (${currentDefectPid})` : ""} ` +
+          `shares this tag with: ${duplicateSummary}. ` +
+          `Likely cloned defect metadata is still being relinked. ` +
+          `Skipping outbound ADO update and suppressing ChatOps failure for this event.`
+        );
+        return true;
+      } catch (error) {
+        console.log(
+          `[Warn] Could not validate duplicate qTest work item tag usage for 'WI${workItemId}'. ` +
+          `Proceeding with outbound sync. ${error.message}`
+        );
+        return false;
+      }
+    }
+
     function mapSeverity(qtestSeverity) {
       const severityId = parseInt(qtestSeverity, 10);
       switch (severityId) {
@@ -923,10 +1033,10 @@ ${text}<br><br>[CID:${commentId}]`;
     function mapPriority(qtestPriority) {
       const priorityId = parseInt(qtestPriority, 10);
       switch (priorityId) {
-        case 10898: return "4 - Critical";
-        case 10204: return "3 - High";
-        case 10203: return "2 - Medium";
-        case 10202: return "1 - Low";
+        case 10898: return 1;
+        case 10204: return 2;
+        case 10203: return 3;
+        case 10202: return 4;
         default: return null;
       }
     }
@@ -1147,6 +1257,10 @@ ${text}<br><br>[CID:${commentId}]`;
 
     const workItemId = wiMatch[1];
     console.log("[Info] Found Azure Work Item ID:", workItemId);
+
+    if (await shouldSkipDuplicateWorkItemTagUpdate(defectId, defectPid, workItemId)) {
+      return;
+    }
 
     let adoCurrent;
     try {

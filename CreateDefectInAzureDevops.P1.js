@@ -17,6 +17,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     const emittedMessageKeys = new Set();
     let adoFieldRefs = null;
     const DEFECT_APPLICATION_FIELD_ID = normalizeText(constants.DefectApplicationFieldID) || "1566";
+    const DEFECT_SOURCE_TEAM_FIELD_ID = normalizeText(constants.DefectSourceTeamFieldID);
     const DEFECT_SITE_NAME_FIELD_ID = normalizeText(constants.DefectSiteNameFieldID) || "1569";
     const DEFECT_ITERATION_PATH_FIELD_ID = normalizeText(constants.DefectIterationPathFieldID) || "1603";
     const DEFECT_LINK_TO_AZURE_DEVOPS_LABEL = "Link to Azure DevOps";
@@ -82,6 +83,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             externalReference: normalizeText(constants.AzDoExternalReferenceFieldRef),
             rootCause: normalizeText(constants.AzDoRootCauseFieldRef),
             proposedFix: normalizeText(constants.AzDoProposedFixFieldRef),
+            sourceTeam: normalizeText(constants.AzDoSourceTeamFieldRef),
             application: normalizeText(constants.AzDoApplicationFieldRef),
             siteName: normalizeText(constants.AzDoSiteNameFieldRef),
             iterationPath: normalizeText(constants.AzDoIterationPathFieldRef),
@@ -695,6 +697,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         const createdByField = getFieldById(defect, constants.DefectCreatedByFieldID);
         const externalReferenceField = getFieldById(defect, constants.DefectExternalReferenceFieldID);
         const applicationField = getFieldById(defect, DEFECT_APPLICATION_FIELD_ID);
+        const sourceTeamField = DEFECT_SOURCE_TEAM_FIELD_ID ? getFieldById(defect, DEFECT_SOURCE_TEAM_FIELD_ID) : null;
         const siteNameField = getFieldById(defect, DEFECT_SITE_NAME_FIELD_ID);
         const rootCauseField = constants.DefectRootCauseFieldID ? getFieldById(defect, constants.DefectRootCauseFieldID) : null;
         const proposedFixField = constants.DefectProposedFixFieldID ? getFieldById(defect, constants.DefectProposedFixFieldID) : null;
@@ -765,6 +768,9 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
         const application = await getDefectFieldLabel(DEFECT_APPLICATION_FIELD_ID, applicationField);
         console.log(`[Info] Defect Application: ${application}`);
+
+        const sourceTeam = normalizeText(await getDefectFieldLabel(DEFECT_SOURCE_TEAM_FIELD_ID, sourceTeamField));
+        console.log(`[Info] Defect Source Team: ${sourceTeam}`);
 
         const siteName = await getDefectFieldLabel(DEFECT_SITE_NAME_FIELD_ID, siteNameField);
         console.log(`[Info] Defect Site Name: ${siteName}`);
@@ -869,6 +875,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
             createdBy,
             externalReference,
             application,
+            sourceTeam,
             siteName,
             rootCause,
             proposedFix,
@@ -898,10 +905,10 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
     function mapPriority(qtestPriority) {
         const priorityId = parseInt(qtestPriority);
         switch (priorityId) {
-            case 10898: return '4 - Critical';
-            case 10204: return '3 - High';
-            case 10203: return '2 - Medium';
-            case 10202: return '1 - Low';
+            case 10898: return 1;
+            case 10204: return 2;
+            case 10203: return 3;
+            case 10202: return 4;
             default: return 3;
         }
     }
@@ -1287,6 +1294,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         qtestCreatedBy,
         qtestExternalReference,
         qtestApplication,
+        qtestSourceTeam,
         qtestSiteName,
         qtestRootCause,
         qtestProposedFix,
@@ -1374,10 +1382,19 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
 
         if (adoFieldRefs.application && qtestApplication) {
             requestBody.push(buildFieldPatchOperation(adoFieldRefs.application, qtestApplication));
+            console.log(`[Info] Added Application to ADO: ${qtestApplication}`);
+        }
+
+        if (adoFieldRefs.sourceTeam && qtestSourceTeam) {
+            requestBody.push(buildFieldPatchOperation(adoFieldRefs.sourceTeam, qtestSourceTeam));
+            console.log(`[Info] Added Source Team to ADO: ${qtestSourceTeam}`);
+        } else if (qtestSourceTeam) {
+            console.log("[Warn] Skipping Source Team - AzDoSourceTeamFieldRef is not configured.");
         }
 
         if (adoFieldRefs.siteName && qtestSiteName) {
             requestBody.push(buildFieldPatchOperation(adoFieldRefs.siteName, qtestSiteName));
+            console.log(`[Info] Added Site Name to ADO: ${qtestSiteName}`);
         }
 
         if (adoFieldRefs.iterationPath && finalIterationPath) {
@@ -1629,6 +1646,7 @@ exports.handler = async function ({ event, constants, triggers }, context, callb
         defectDetails.createdBy,
         defectDetails.externalReference,
         defectDetails.application,
+        defectDetails.sourceTeam,
         defectDetails.siteName,
         defectDetails.rootCause,
         defectDetails.proposedFix,
